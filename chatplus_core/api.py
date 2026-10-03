@@ -29,7 +29,10 @@ from chatplus_core.models import (
     MessagesAnswer,
     Model,
     ProviderInfo,
+    Room,
     RoomsAnswer,
+    SendAnswer,
+    SendRequest,
     StreamCursor,
     StreamMessage,
     StreamPing,
@@ -44,6 +47,7 @@ from chatplus_core.reader import (
     RoomNotFoundError,
     Snapshot,
 )
+from chatplus_core.sender import Sender, SendError, WriteLine, confirm
 from chatplus_core.storage import StorageError
 from chatplus_core.stream import (
     Positions,
@@ -58,20 +62,23 @@ from chatplus_core.stream import (
 from chatplus_core.values import ValueFormatError
 
 CONTRACT_VERSION: Final = "0.2.5"
-ADAPTER_VERSION: Final = "0.2.0"
+ADAPTER_VERSION: Final = "0.3.0"
 MIN_TOKEN_BYTES: Final = 32
 MAX_ID_LENGTH: Final = 512
 MAX_STREAMS: Final = 8
 STREAM_POLL_SECONDS: Final = 1.0
 STREAM_PING_SECONDS: Final = 15.0
+# A conservative cap, refined against the client when the window sender is wired.
+MAX_SEND_LENGTH: Final = 1000
+SEND_CONFIRM_SECONDS: Final = 10.0
 FEATURES: Final[dict[str, dict[str, str | int]]] = {
     "rooms.list": {},
     "messages.read": {"paging": "before-id", "maxLimit": MAX_LIMIT},
     "messages.stream": {"resume": "cursor"},
 }
+SEND_FEATURE: Final[dict[str, str | int]] = {"maxLength": MAX_SEND_LENGTH, "receipt": "stored"}
 UNSUPPORTED: Final = (
     ("GET", "/media"),
-    ("POST", "/send"),
     ("POST", "/edit"),
     ("POST", "/delete"),
     ("POST", "/react"),
@@ -98,15 +105,16 @@ class ConfigurationError(Exception):
         super().__init__(f"CHATPLUS_TOKEN must contain at least {MIN_TOKEN_BYTES} bytes")
 
 
-def declaration() -> Capabilities:
+def declaration(*, can_send: bool) -> Capabilities:
     """Declare what this adapter performs end to end, revised by a hash of the content."""
+    features = {**FEATURES, **({"messages.send": SEND_FEATURE} if can_send else {})}
     draft = Capabilities(
         contract=ContractInfo(version=CONTRACT_VERSION),
         adapter=AdapterInfo(name="chatplus-core", version=ADAPTER_VERSION),
         provider=ProviderInfo(id="chatplus", name="채팅+"),
         account=AccountInfo(kind="user"),
         revision="",
-        features=FEATURES,
+        features=features,
     )
     content = draft.model_dump_json(by_alias=True, exclude={"ok", "revision"})
     revision = hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -261,20 +269,67 @@ async def no_icon() -> JSONResponse:
     return failure(ErrorCode.NOT_FOUND, "This adapter has no provider icon")
 
 
-def _route_refusals(app: FastAPI, guard: list[params.Depends]) -> None:
+async def _send_target(reader: Reader, body: SendRequest) -> tuple[Room, frozenset[str]] | Response:
+    """Validate a send and resolve its room and the outgoing messages already there."""
+    if body.reply_to is not None:
+        return failure(ErrorCode.NOT_SUPPORTED, "messages.reply is not declared")
+    if not 1 <= len(body.text) <= MAX_SEND_LENGTH:
+        return failure(ErrorCode.INVALID_REQUEST, "text is empty or longer than maxLength")
+    snapshot = await anyio.to_thread.run_sync(reader.snapshot)
+    room = next((r for r in snapshot.rooms if r.id == body.room_id), None)
+    if room is None:
+        return failure(ErrorCode.NOT_FOUND, "No such room in the local cache")
+    before = frozenset(m.id for m in snapshot.messages if m.room_id == room.id and m.from_me)
+    return room, before
+
+
+async def perform_send(
+    reader: Reader, sender: Sender, line: WriteLine, body: SendRequest
+) -> Response:
+    """Send text into an existing room, answering the message the client stored.
+
+    The room must be in the cache; the write line admits it or refuses; the sender
+    submits to the client's own window; the read-back confirms what was stored. A
+    send the read-back cannot confirm is uncertain, answered INTERNAL, not retried.
+    """
+    resolved = await _send_target(reader, body)
+    if isinstance(resolved, Response):
+        return resolved
+    room, before = resolved
+    try:
+        async with line.admit():
+            await sender.submit(room, body.text)
+            stored = await confirm(
+                reader, room.id, body.text, before, deadline_seconds=SEND_CONFIRM_SECONDS
+            )
+    except SendError as refusal:
+        return failure(refusal.code, refusal.message)
+    if stored is None:
+        return failure(ErrorCode.INTERNAL, "submitted but not confirmed")
+    answer = SendAnswer(message=stored)
+    return JSONResponse(
+        content=answer.model_dump(by_alias=True, exclude_none=True, mode="json"),
+        headers={"cache-control": "no-store"},
+    )
+
+
+def _route_refusals(
+    app: FastAPI, guard: list[params.Depends], routes: tuple[tuple[str, str], ...]
+) -> None:
     """Route every documented operation this adapter does not perform, behind the token."""
     app.add_api_route("/icon", no_icon, methods=["GET"], dependencies=guard)
-    for method, path in UNSUPPORTED:
+    for method, path in routes:
         app.add_api_route(path, not_supported, methods=[method], dependencies=guard)
 
 
-def create_app(token: str, reader: Reader | None = None) -> FastAPI:
+def create_app(token: str, reader: Reader | None = None, sender: Sender | None = None) -> FastAPI:
     """Build the adapter; every route but /health requires the caller's token."""
     if len(token.encode("utf-8")) < MIN_TOKEN_BYTES:
         raise ConfigurationError
     backend = reader if reader is not None else Reader()
     slots = StreamSlots(limit=MAX_STREAMS)
-    capabilities = declaration()
+    write_line = WriteLine()
+    capabilities = declaration(can_send=sender is not None)
     expected = hashlib.sha256(token.encode("utf-8")).digest()
     guard = [params.Depends(_require_token(expected))]
     app = FastAPI(
@@ -310,5 +365,13 @@ def create_app(token: str, reader: Reader | None = None) -> FastAPI:
     async def stream(since: Annotated[list[str] | None, Query()] = None) -> Response:
         return await open_stream(backend, slots, since or [])
 
-    _route_refusals(app, guard)
+    if sender is not None:
+        active = sender
+
+        @app.post("/send", dependencies=guard)
+        async def send(body: SendRequest) -> Response:
+            return await perform_send(backend, active, write_line, body)
+
+    refusals = UNSUPPORTED if sender is not None else (*UNSUPPORTED, ("POST", "/send"))
+    _route_refusals(app, guard, refusals)
     return app

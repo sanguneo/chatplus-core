@@ -139,3 +139,18 @@ class StreamPing(Model):
     """A keep-alive while the stream is quiet."""
 
     ok: Literal[True] = True
+
+
+class SendRequest(Model):
+    """Text to send into an existing room."""
+
+    room_id: str
+    text: str
+    reply_to: str | None = None
+
+
+class SendAnswer(Model):
+    """The message the client stored for a submitted send."""
+
+    ok: Literal[True] = True
+    message: Message
