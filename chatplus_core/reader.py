@@ -160,20 +160,21 @@ def to_room(room_id: str, attrs: dict[str | int, Value], newest: Message | None)
     )
 
 
-def folder_of(parent: str, folders: dict[str, Folder], by_path: dict[str, list[Folder]]) -> Folder:
+def folder_of(
+    parent: str, folders: dict[str, Folder], by_path: dict[str, list[Folder]]
+) -> Folder | None:
     """Place a message by its folder's exact URL, else by the one folder at the same path.
 
     A message sent from this PC can name its folder through another host of the
-    same message store; the path (store and folder id) still names one folder.
-    No match, or more than one, is refused rather than guessed.
+    same message store; the path (store and folder id) still names one folder. No
+    match, or more than one, returns None: the message is skipped as pending (a
+    conversation still being created) rather than guessed at or taken as fatal.
     """
     exact = folders.get(parent)
     if exact is not None:
         return exact
     candidates = by_path.get(urlsplit(parent).path, [])
-    if len(candidates) != 1:
-        raise StorageError(StorageIssue.ORPHAN)
-    return candidates[0]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +223,10 @@ class Reader:
             parent = raw.get("parentFolder") if isinstance(raw, dict) else None
             if not isinstance(parent, str) or not parent:
                 continue
-            messages.append(to_message(record, folder_of(parent, folders, by_path)[0]))
+            folder = folder_of(parent, folders, by_path)
+            if folder is None:
+                continue
+            messages.append(to_message(record, folder[0]))
         messages.sort(key=lambda message: (message.sent_at, message.id))
         newest = {message.room_id: message for message in messages}
         rooms = sorted(

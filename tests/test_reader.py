@@ -166,21 +166,17 @@ def test_a_message_naming_its_folder_through_another_host_is_placed(tmp_path: Pa
     assert by_id["m-elsewhere"].room_id == by_id["m-old"].room_id
 
 
-def test_a_message_whose_folder_path_is_unknown_is_refused(tmp_path: Path) -> None:
+def test_a_message_whose_folder_path_is_unknown_is_skipped(tmp_path: Path) -> None:
     reader = orphan_with(tmp_path, "https://synthetic.invalid/room/zzz")
-    with pytest.raises(StorageError) as error:
-        _ = reader.snapshot()
-    assert error.value.issue is StorageIssue.ORPHAN
+    assert "m-elsewhere" not in {m.id for m in reader.snapshot().messages}
 
 
-def test_a_folder_path_shared_by_two_folders_is_refused(tmp_path: Path) -> None:
+def test_a_message_whose_folder_path_is_ambiguous_is_skipped(tmp_path: Path) -> None:
     reader = orphan_with(tmp_path, "https://third.synthetic.invalid/room/a")
     twin = Record(37, {0: {"resourceURL": "https://other.synthetic.invalid/room/a"}, 3: {}})
     with (tmp_path / "folder.hive").open("ab") as output:
         _ = output.write(frame("folder-twin", encode(twin)))
-    with pytest.raises(StorageError) as error:
-        _ = reader.snapshot()
-    assert error.value.issue is StorageIssue.ORPHAN
+    assert "m-elsewhere" not in {m.id for m in reader.snapshot().messages}
 
 
 def test_a_placeholder_folder_being_created_is_skipped(tmp_path: Path) -> None:
