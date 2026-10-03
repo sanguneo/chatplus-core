@@ -103,7 +103,7 @@ def declaration() -> Capabilities:
     draft = Capabilities(
         contract=ContractInfo(version=CONTRACT_VERSION),
         adapter=AdapterInfo(name="chatplus-core", version=ADAPTER_VERSION),
-        provider=ProviderInfo(id="chatplus", name="ChattingPlus"),
+        provider=ProviderInfo(id="chatplus", name="채팅+"),
         account=AccountInfo(kind="user"),
         revision="",
         features=FEATURES,
