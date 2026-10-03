@@ -125,3 +125,14 @@ def test_malformed_cursor_is_rejected(tmp_path: Path) -> None:
     room_id = next(m.room_id for m in reader.snapshot().messages if m.id == "m-new")
     with pytest.raises(CursorError):
         _ = reader.messages(room_id, limit=1, cursor="not-a-cursor")
+
+
+def test_attachment_metadata_without_bytes(tmp_path: Path) -> None:
+    by_id = {m.id: m for m in Reader(profile_at(tmp_path)).snapshot().messages}
+    image = by_id["m-img"]
+    assert image.content_type == "image/jpeg"
+    assert image.has_attachment is True
+    assert image.text is None
+    plain = by_id["m-new"]
+    assert plain.content_type is None
+    assert plain.has_attachment is False

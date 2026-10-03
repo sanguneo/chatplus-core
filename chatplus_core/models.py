@@ -33,6 +33,8 @@ class Message(Model):
     text: str | None
     sent_at: datetime
     direction_raw: str | None
+    content_type: str | None = None
+    has_attachment: bool = False
 
 
 class Rooms(Model):

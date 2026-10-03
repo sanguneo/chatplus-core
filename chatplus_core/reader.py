@@ -122,6 +122,8 @@ class Reader:
                 raise ValueFormatError(ValueIssue.DATE) from exc
             if stamp.tzinfo is None:
                 raise ValueFormatError(ValueIssue.DATE)
+            content_type = optional_text(attrs.get("Content-Type"))
+            is_textual = content_type is None or content_type.lower().startswith("text/")
             messages.append(
                 Message(
                     id=text(record.fields.get(1)),
@@ -129,6 +131,8 @@ class Reader:
                     text=optional_text(attrs.get("TextContent")),
                     sent_at=stamp,
                     direction_raw=optional_text(attrs.get("Direction")),
+                    content_type=content_type,
+                    has_attachment=not is_textual,
                 )
             )
         return Snapshot(

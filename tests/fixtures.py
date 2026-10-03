@@ -68,6 +68,14 @@ def profile_at(directory: Path) -> Profile:
                 6: {"Date": "2026-01-01T03:00:00Z", "MessageBody": "<rich/>"},
             },
         ),
+        Record(
+            38,
+            {
+                0: {"parentFolder": "https://synthetic.invalid/room/b"},
+                1: "m-img",
+                6: {"Date": "2026-01-01T04:00:00Z", "Content-Type": "image/jpeg"},
+            },
+        ),
     ]
     _ = (directory / "folder.hive").write_bytes(
         frame("version", encode(1))

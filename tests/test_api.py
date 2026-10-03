@@ -160,3 +160,24 @@ def test_stream_events_emit_ready_frame_first(tmp_path: Path) -> None:
             await events.aclose()
 
     assert "ready" in anyio.run(pull_ready)
+
+
+def test_messages_expose_attachment_metadata(tmp_path: Path) -> None:
+    reader = Reader(profile_at(tmp_path))
+    room_id = next(m.room_id for m in reader.snapshot().messages if m.id == "m-img")
+    with TestClient(create_app(TOKEN, reader)) as client:
+        response = client.get(
+            "/messages",
+            params={"roomId": room_id, "limit": 10},
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+    payload = Messages.model_validate_json(response.content)
+    image = next(m for m in payload.messages if m.id == "m-img")
+    assert image.content_type == "image/jpeg"
+    assert image.has_attachment is True
+
+
+def test_media_byte_route_is_absent(tmp_path: Path) -> None:
+    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
+        response = client.get("/media", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert response.status_code == 404
