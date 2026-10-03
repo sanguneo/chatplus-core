@@ -89,6 +89,26 @@ curl.exe -H "Authorization: Bearer $env:CHATPLUS_TOKEN" http://127.0.0.1:8766/ro
 메시지를 가리키는 커서는 지금부터로 낮추지 않고 400으로 거절합니다. 스트림은 동시에 8개까지
 받고, 아홉 번째는 `503 BUSY`입니다.
 
+## saya 연결
+
+saya는 이 어댑터를 tsuba 어댑터로, 설정만으로 붙입니다. 코어는 루프백에 두고 kanao처럼
+`tailscale serve`로 tailnet에만 엽니다. 이 PC는 8766을 다른 프로세스가 쓰므로 8767을 씁니다.
+
+```powershell
+$env:CHATPLUS_PORT = "8767"
+$env:CHATPLUS_TOKEN = (Get-Content "$HOME\.chatplus-core\token" -Raw).Trim()
+uv run python -m chatplus_core
+# 한 번만 하면 Tailscale이 기억합니다.
+tailscale serve --bg --https=8767 http://127.0.0.1:8767
+```
+
+saya 쪽은 프록시 설정 두 가지입니다. `/adapters` 인덱스에 `{"id":"chatplus"}`를 넣고,
+`/adapters/chatplus/*`를 `https://<pc>.<tailnet>.ts.net:8767`로 넘기면서
+`Authorization: Bearer {env.SAYA_ADAPTER_CHATPLUS_TOKEN}`와 `Host {upstream_hostport}`를
+붙입니다(saya `deploy/Caddyfile.example`의 어댑터 handle과 같은 모양). 토큰은 위 토큰 파일과
+같은 값을 권한 600인 env 파일에 둡니다. 이 PC에서 코어가 꺼져 있으면 saya 목록에서 채팅+만
+빠집니다.
+
 ## 보장 범위
 
 - 로컬 캐시만 읽습니다. 휴대폰이나 서버의 전체 이력이 아닙니다.
@@ -155,8 +175,8 @@ uv run python -m tools.verify_socket
 상세 의존성, 불변식, 반례, 실행 절차와 완료 조건은
 [후속 작업 계획](.omo/plans/chatplus-core-followup.md)에 정리합니다. 계획의 B2(계정 신원),
 F1(페이지네이션), F2(SSE), F3(발송 상태기계 설계), F4(첨부 메타데이터)와 tsuba 계약
-전환(§14)은 구현됐습니다. 남은 것은 saya 연결 확인, F3 실제 전송, 읽음 상태(`unread`) 매핑,
-스냅샷 세대 일관성(C2)입니다.
+전환(§14)은 구현됐고, OCI의 saya에 연결해 실데이터로 확인했습니다. 남은 것은 F3 실제 전송,
+읽음 상태(`unread`) 매핑, 스냅샷 세대 일관성(C2)입니다.
 
 공식 PC 지원 조건과 외부 형식 근거:
 
