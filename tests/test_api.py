@@ -1,10 +1,17 @@
 # Copyright (c) 2026 chatplus-core contributors
 from pathlib import Path
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
-from chatplus_core.api import Capabilities, ConfigurationError, Failure, create_app
+from chatplus_core.api import (
+    Capabilities,
+    ConfigurationError,
+    Failure,
+    create_app,
+    stream_events,
+)
 from chatplus_core.models import Messages, Rooms
 from chatplus_core.reader import Reader
 from tests.fixtures import profile_at
@@ -135,3 +142,21 @@ def test_malformed_cursor_is_bad_request(tmp_path: Path) -> None:
         )
     assert response.status_code == 400
     assert Failure.model_validate_json(response.content).error.code == "BAD_REQUEST"
+
+
+def test_stream_requires_auth(tmp_path: Path) -> None:
+    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
+        assert client.get("/stream").status_code == 401
+
+
+def test_stream_events_emit_ready_frame_first(tmp_path: Path) -> None:
+    reader = Reader(profile_at(tmp_path))
+
+    async def pull_ready() -> str:
+        events = stream_events(reader, [])
+        try:
+            return await anext(events)
+        finally:
+            await events.aclose()
+
+    assert "ready" in anyio.run(pull_ready)
