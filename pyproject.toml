@@ -11,7 +11,13 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "basedpyright>=1.21", "ruff>=0.8", "httpx2>=1"]
+dev = [
+    "pytest>=8",
+    "basedpyright>=1.21",
+    "ruff>=0.8",
+    "httpx2>=1",
+    "hypothesis>=6.168.3",
+]
 
 [tool.basedpyright]
 typeCheckingMode = "all"
