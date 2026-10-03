@@ -12,7 +12,7 @@ from typing import IO
 
 import httpx2
 
-from chatplus_core.models import Rooms
+from chatplus_core.models import RoomsAnswer
 
 PORT_SCAN_START = 8801
 PORT_SCAN_END = 8900
@@ -85,21 +85,23 @@ def main() -> None:
                     process.terminate()
                     raise
             with httpx2.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
+                health = client.get("/health")
                 denied = client.get("/rooms")
                 allowed = client.get(
-                    "/rooms?limit=1",
+                    "/rooms",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 _ = allowed.raise_for_status()
-                rooms = Rooms.model_validate_json(allowed.content)
+                rooms = RoomsAnswer.model_validate_json(allowed.content)
                 print(
                     json.dumps(
                         {
                             "transport": "loopback-tcp",
                             "port": port,
+                            "healthStatus": health.status_code,
                             "unauthenticatedStatus": denied.status_code,
                             "authenticatedStatus": allowed.status_code,
-                            "totalRooms": rooms.total,
+                            "totalRooms": len(rooms.rooms),
                         }
                     )
                 )

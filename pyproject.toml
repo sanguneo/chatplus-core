@@ -1,7 +1,7 @@
 [project]
 name = "chatplus-core"
-version = "0.1.0"
-description = "Local, read-only ChattingPlus Windows integration"
+version = "0.2.0"
+description = "Read-only ChattingPlus adapter answering the tsuba contract"
 requires-python = ">=3.11"
 dependencies = [
   "cryptography>=46",

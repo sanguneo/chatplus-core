@@ -292,3 +292,32 @@ P-MEM 자원 상한(§2.5)은 독립, 아무 때나 측정 가능
   없다. 대형 계정(수십 MB 박스) 지원이 필요해질 때 스트리밍/경량 디코드를 착수한다.
   지금 최적화는 조기(premature)다. 트리거: 실제 박스 총크기가 메모리 예산을 위협할 때.
 - **F3 실제 전송·saya 연결**: 각각 발송/타 레포라 이번 비전송 범위에서 제외.
+
+## 14. tsuba 어댑터 전환 (Model A, 2026-10-03 사용자 승인)
+
+saya는 tsuba 계약을 답하는 프로세스를 **설정만으로** 어댑터로 띄운다(server/adapters.ts:
+`SAYA_ADAPTERS` + URL/TOKEN, 코드 0수정). 따라서 chatplus-core를 **tsuba 계약을 답하도록**
+재작업한다(serve-kit은 TS라 쓰지 않고 Python이 tsuba 계약을 직접 답함). 복호화·Hive
+디코드·리더·커서·스트림 로직은 재사용, HTTP 표면만 교체. tsuba 레포는 수정하지 않음.
+
+선언 기능(지원하는 것만): `rooms.list`, `messages.read`(paging=before-id, maxLimit=1000),
+`messages.stream`(resume=cursor). **attachments.read 미선언**(로컬 첨부 바이트 없음 → /media
+서빙 불가). send/edit/delete/react/read/avatars 미선언(읽기 전용).
+
+envelope: `{ok:true,...}` / `{ok:false,error:{code,message}}`, 상태코드 STATUS 맵.
+라우트: `GET /health`(인증X), `/capabilities`(bearer), `/rooms`, `/messages?roomId&limit&before`,
+`/stream`. 미선언 기능의 라우트는 인증 뒤 501 NOT_SUPPORTED.
+
+매핑(실데이터 조사):
+- Room: id=sha256(epoch‖resourceURL), title=folder attr `Name`, kind=`Recipients`>1?group:direct,
+  unread=0(미보유), lastActivityAt=folder attr `Date`. /rooms 답={ok,rooms,complete:true}.
+- Message: id, roomId, sender=attr `From`, senderId?=attr `sender-id`, text=`TextContent`||"",
+  kind=has_attachment?media:text, sentAt=attr `Date`, fromMe=(`Direction`=="Out"). Direction 값은
+  "In"(126)/"Out"(14). attachments 생략. /messages 답={ok,messages,hasEarlier}, before-id 페이징.
+- stream: ready{ok,resumed,cursor}/message{ok,message}/cursor{ok,cursor}/ping{ok}/error.
+  cursor=Record<roomId,messageId>, resume는 since 쿼리.
+
+자체 openapi.json·dump_contract·test_contract는 제거(자체 계약 미발행; tsuba 계약을 따름).
+대신 응답이 tsuba 계약(Room/Message/envelope)과 일치하는지 적합성 테스트 추가.
+배포: Tailscale 사설망 + 베어러 토큰(kanao와 동일), 루프백 기본 바인딩에 CHATPLUS_HOST
+옵션 추가. 공개 노출 금지.

@@ -1,73 +1,65 @@
 # Copyright (c) 2026 chatplus-core contributors
+from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 
 import anyio
 import pytest
 from fastapi.testclient import TestClient
+from typing_extensions import override
 
 from chatplus_core.api import (
-    Capabilities,
     ConfigurationError,
-    Failure,
+    StreamSlots,
     create_app,
+    held,
+    open_stream,
     stream_events,
 )
-from chatplus_core.models import Messages, Rooms
-from chatplus_core.reader import Reader
-from tests.fixtures import profile_at
+from chatplus_core.models import MessagesAnswer, RoomsAnswer
+from chatplus_core.reader import Reader, Snapshot
+from chatplus_core.storage import StorageError, StorageIssue
+from chatplus_core.stream import initial_positions
+from chatplus_core.values import Record
+from tests.fixtures import encode, profile_at
+from tests.test_hive import frame
+from tests.wire import arr, error_code, obj, parse, sse
 
 TOKEN = bytes(range(32)).hex()
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
-@pytest.mark.parametrize("route", ["/capabilities", "/rooms", "/messages", "/openapi.json"])
-def test_every_route_requires_authentication(route: str, tmp_path: Path) -> None:
-    app = create_app(TOKEN, Reader(profile_at(tmp_path)))
-    with TestClient(app) as client:
-        response = client.get(route)
-    assert response.status_code == 401
-    assert Failure.model_validate_json(response.content).error.code == "UNAUTHORIZED"
+@pytest.fixture
+def reader(tmp_path: Path) -> Reader:
+    return Reader(profile_at(tmp_path))
 
 
-def test_authenticated_api_reads_real_synthetic_hive(tmp_path: Path) -> None:
-    reader = Reader(profile_at(tmp_path))
-    room_id = next(
-        message.room_id for message in reader.snapshot().messages if message.id == "m-new"
-    )
-    with TestClient(create_app(TOKEN, reader)) as client:
-        response = client.get(
-            "/messages",
-            params={"roomId": room_id, "limit": 1},
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        )
+@pytest.fixture
+def client(reader: Reader) -> Iterator[TestClient]:
+    with TestClient(create_app(TOKEN, reader)) as test_client:
+        yield test_client
+
+
+def room_of(reader: Reader, message_id: str) -> str:
+    return next(m.room_id for m in reader.snapshot().messages if m.id == message_id)
+
+
+class UnreadableReader(Reader):
+    @override
+    def snapshot(self) -> Snapshot:
+        raise StorageError(StorageIssue.CHANGED)
+
+
+def test_health_answers_without_a_token(client: TestClient) -> None:
+    response = client.get("/health")
     assert response.status_code == 200
-    assert Messages.model_validate_json(response.content).messages[0].text == "new"
+    assert parse(response.content) == {"ok": True}
 
 
-def test_room_limit_reports_truncation(tmp_path: Path) -> None:
-    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
-        response = client.get("/rooms?limit=1", headers={"Authorization": f"Bearer {TOKEN}"})
-    payload = Rooms.model_validate_json(response.content)
-    assert len(payload.rooms) == 1
-    assert payload.total == 2
-    assert payload.truncated is True
-
-
-@pytest.mark.parametrize("query", ["limit=-1", "limit=1001", "limit=no"])
-def test_invalid_limits_are_refused(query: str, tmp_path: Path) -> None:
-    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
-        response = client.get(f"/rooms?{query}", headers={"Authorization": f"Bearer {TOKEN}"})
-    assert response.status_code == 400
-    assert Failure.model_validate_json(response.content).error.code == "BAD_REQUEST"
-
-
-def test_corrupted_store_is_not_an_empty_success(tmp_path: Path) -> None:
-    profile = profile_at(tmp_path)
-    _ = (tmp_path / "object.hive").write_bytes(b"corrupt")
-    with TestClient(create_app(TOKEN, Reader(profile))) as client:
-        response = client.get("/rooms", headers={"Authorization": f"Bearer {TOKEN}"})
-    assert response.status_code == 503
-    assert Failure.model_validate_json(response.content).error.code == "UNSUPPORTED_FORMAT"
-    assert str(tmp_path).encode() not in response.content
+def test_wrong_token_is_unauthorized_with_a_challenge(client: TestClient) -> None:
+    response = client.get("/rooms", headers={"Authorization": "Bearer " + "x" * 64})
+    assert response.status_code == 401
+    assert error_code(response.content) == "UNAUTHORIZED"
+    assert response.headers["www-authenticate"] == "Bearer"
 
 
 def test_empty_token_prevents_startup() -> None:
@@ -75,110 +67,225 @@ def test_empty_token_prevents_startup() -> None:
         _ = create_app("")
 
 
-def test_capabilities_advertise_only_reads(tmp_path: Path) -> None:
-    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
-        response = client.get("/capabilities", headers={"Authorization": f"Bearer {TOKEN}"})
-    assert Capabilities.model_validate_json(response.content).features == (
-        "rooms.read",
-        "messages.read",
-        "messages.stream",
+def test_capabilities_declare_only_reads(client: TestClient) -> None:
+    body = obj(parse(client.get("/capabilities", headers=AUTH).content))
+    features = obj(body["features"])
+    assert set(features) == {"rooms.list", "messages.read", "messages.stream"}
+    assert features["messages.read"] == {"paging": "before-id", "maxLimit": 1000}
+    assert features["messages.stream"] == {"resume": "cursor"}
+    assert body["account"] == {"kind": "user"}
+
+
+def test_rooms_come_latest_activity_first_with_their_kind(client: TestClient) -> None:
+    payload = RoomsAnswer.model_validate_json(client.get("/rooms", headers=AUTH).content)
+    assert payload.complete is True
+    assert [room.kind for room in payload.rooms] == ["group", "direct"]
+
+
+def test_room_and_message_wire_keys(client: TestClient, reader: Reader) -> None:
+    rooms = parse(client.get("/rooms", headers=AUTH).content)
+    params = {"roomId": room_of(reader, "m-new")}
+    messages = parse(client.get("/messages", params=params, headers=AUTH).content)
+    room = obj(arr(obj(rooms)["rooms"])[0])
+    message = obj(arr(obj(messages)["messages"])[0])
+    assert set(room) == {"id", "title", "kind", "unread", "lastActivityAt", "lastMessage"}
+    assert set(message) == {
+        "id",
+        "roomId",
+        "sender",
+        "senderId",
+        "text",
+        "kind",
+        "sentAt",
+        "fromMe",
+    }
+
+
+def test_a_key_that_does_not_apply_is_absent_not_null(tmp_path: Path) -> None:
+    profile = profile_at(tmp_path)
+    anonymous = Record(
+        38,
+        {
+            0: {"parentFolder": "https://synthetic.invalid/room/a"},
+            1: "m-anon",
+            6: {"Date": "2026-01-01T05:00:00Z", "TextContent": "hi", "Direction": "In"},
+        },
     )
-
-
-def test_missing_room_is_404(tmp_path: Path) -> None:
-    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
-        response = client.get(
-            "/messages", params={"roomId": "0" * 64}, headers={"Authorization": f"Bearer {TOKEN}"}
-        )
-    assert response.status_code == 404
-    assert Failure.model_validate_json(response.content).error.code == "NOT_FOUND"
-
-
-def test_send_route_is_absent(tmp_path: Path) -> None:
-    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
-        response = client.post("/send", headers={"Authorization": f"Bearer {TOKEN}"})
-    assert response.status_code == 404
-
-
-def test_specification_matches_validation_status(tmp_path: Path) -> None:
-    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
-        response = client.get("/openapi.json", headers={"Authorization": f"Bearer {TOKEN}"})
-    assert response.status_code == 200
-    assert b'"/messages"' in response.content
-    assert b'"400"' in response.content
-    assert b'"422"' not in response.content
-    assert TOKEN.encode() not in response.content
-
-
-def test_messages_pagination_over_http(tmp_path: Path) -> None:
-    reader = Reader(profile_at(tmp_path))
-    room_id = next(m.room_id for m in reader.snapshot().messages if m.id == "m-new")
+    with (tmp_path / "object.hive").open("ab") as output:
+        _ = output.write(frame("m-anon", encode(anonymous)))
+    reader = Reader(profile)
     with TestClient(create_app(TOKEN, reader)) as client:
-        first = client.get(
-            "/messages",
-            params={"roomId": room_id, "limit": 1},
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        )
-        page_one = Messages.model_validate_json(first.content)
-        assert page_one.next_cursor is not None
-        second = client.get(
-            "/messages",
-            params={"roomId": room_id, "limit": 1, "cursor": page_one.next_cursor},
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        )
-        page_two = Messages.model_validate_json(second.content)
-    assert [m.id for m in page_one.messages] == ["m-new"]
-    assert [m.id for m in page_two.messages] == ["m-old"]
-    assert page_two.next_cursor is None
+        params = {"roomId": room_of(reader, "m-anon")}
+        response = client.get("/messages", params=params, headers=AUTH)
+    newest = obj(arr(obj(parse(response.content))["messages"])[-1])
+    assert newest["sender"] == ""
+    assert "senderId" not in newest
+    assert b"null" not in response.content
 
 
-def test_malformed_cursor_is_bad_request(tmp_path: Path) -> None:
-    reader = Reader(profile_at(tmp_path))
-    room_id = next(m.room_id for m in reader.snapshot().messages if m.id == "m-new")
-    with TestClient(create_app(TOKEN, reader)) as client:
-        response = client.get(
-            "/messages",
-            params={"roomId": room_id, "cursor": "not-a-cursor"},
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        )
+def test_messages_read_the_newest_window(client: TestClient, reader: Reader) -> None:
+    params = {"roomId": room_of(reader, "m-new"), "limit": "1"}
+    response = client.get("/messages", params=params, headers=AUTH)
+    payload = MessagesAnswer.model_validate_json(response.content)
+    assert [m.id for m in payload.messages] == ["m-new"]
+    assert payload.has_earlier is True
+
+
+def test_before_pages_backward_over_http(client: TestClient, reader: Reader) -> None:
+    params = {"roomId": room_of(reader, "m-new"), "limit": "1", "before": "m-new"}
+    response = client.get("/messages", params=params, headers=AUTH)
+    payload = MessagesAnswer.model_validate_json(response.content)
+    assert [m.id for m in payload.messages] == ["m-old"]
+    assert payload.has_earlier is False
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"roomId": "r", "limit": "0"},
+        {"roomId": "r", "limit": "1001"},
+        {"roomId": "r", "limit": "no"},
+        {},
+    ],
+)
+def test_invalid_reads_are_refused(client: TestClient, params: dict[str, str]) -> None:
+    response = client.get("/messages", params=params, headers=AUTH)
     assert response.status_code == 400
-    assert Failure.model_validate_json(response.content).error.code == "BAD_REQUEST"
+    assert error_code(response.content) == "INVALID_REQUEST"
 
 
-def test_stream_requires_auth(tmp_path: Path) -> None:
-    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
-        assert client.get("/stream").status_code == 401
+def test_missing_room_is_not_found(client: TestClient) -> None:
+    response = client.get("/messages", params={"roomId": "0" * 64}, headers=AUTH)
+    assert response.status_code == 404
+    assert error_code(response.content) == "NOT_FOUND"
 
 
-def test_stream_events_emit_ready_frame_first(tmp_path: Path) -> None:
-    reader = Reader(profile_at(tmp_path))
+def test_unknown_before_is_not_found(client: TestClient, reader: Reader) -> None:
+    params = {"roomId": room_of(reader, "m-new"), "before": "gone"}
+    response = client.get("/messages", params=params, headers=AUTH)
+    assert response.status_code == 404
+    assert error_code(response.content) == "NOT_FOUND"
 
-    async def pull_ready() -> str:
-        events = stream_events(reader, [])
+
+def test_corrupted_store_is_internal_without_paths(tmp_path: Path) -> None:
+    profile = profile_at(tmp_path)
+    _ = (tmp_path / "object.hive").write_bytes(b"corrupt")
+    with TestClient(create_app(TOKEN, Reader(profile))) as client:
+        response = client.get("/rooms", headers=AUTH)
+    assert response.status_code == 500
+    assert error_code(response.content) == "INTERNAL"
+    assert str(tmp_path).encode() not in response.content
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/media"),
+        ("POST", "/send"),
+        ("POST", "/edit"),
+        ("POST", "/delete"),
+        ("POST", "/react"),
+        ("POST", "/read"),
+    ],
+)
+def test_undeclared_features_answer_not_supported(
+    client: TestClient, method: str, path: str
+) -> None:
+    response = client.request(method, path, headers=AUTH)
+    assert response.status_code == 501
+    assert error_code(response.content) == "NOT_SUPPORTED"
+
+
+def test_icon_is_not_found_without_a_provider_icon(client: TestClient) -> None:
+    response = client.get("/icon", headers=AUTH)
+    assert response.status_code == 404
+    assert error_code(response.content) == "NOT_FOUND"
+
+
+def test_wrong_method_names_the_allowed_one(client: TestClient) -> None:
+    response = client.get("/send", headers=AUTH)
+    assert response.status_code == 405
+    assert error_code(response.content) == "METHOD_NOT_ALLOWED"
+    assert "POST" in response.headers["allow"]
+
+
+def test_unknown_route_is_not_found(client: TestClient) -> None:
+    response = client.get("/nowhere", headers=AUTH)
+    assert response.status_code == 404
+    assert error_code(response.content) == "NOT_FOUND"
+
+
+def test_stream_refuses_a_cursor_it_cannot_honour(client: TestClient, reader: Reader) -> None:
+    params = {"since": f"{room_of(reader, 'm-new')}:gone"}
+    response = client.get("/stream", params=params, headers=AUTH)
+    assert response.status_code == 400
+    assert error_code(response.content) == "INVALID_REQUEST"
+
+
+def test_stream_is_busy_past_its_limit(reader: Reader) -> None:
+    async def admit() -> tuple[int, bytes]:
+        response = await open_stream(reader, StreamSlots(limit=1, live=1), [])
+        return response.status_code, bytes(response.body)
+
+    status, body = anyio.run(admit)
+    assert status == 503
+    assert error_code(body) == "BUSY"
+
+
+def test_a_stream_holds_its_slot_until_it_ends() -> None:
+    slots = StreamSlots(limit=8)
+
+    async def source() -> AsyncGenerator[str, None]:
+        yield "frame"
+
+    async def run() -> tuple[int, int, int]:
+        before = slots.live
+        events = held(slots, source())
+        _ = await anext(events)
+        during = slots.live
+        await events.aclose()
+        return before, during, slots.live
+
+    assert anyio.run(run) == (0, 1, 0)
+
+
+def test_stream_resumes_a_named_room_then_goes_live(reader: Reader) -> None:
+    snapshot = reader.snapshot()
+    room, other = room_of(reader, "m-new"), room_of(reader, "m-img")
+
+    async def pull() -> list[str]:
+        positions = initial_positions(snapshot, {room: "m-old"})
+        events = stream_events(reader, snapshot, positions, resumed=True, poll_seconds=0)
         try:
-            return await anext(events)
+            return [await anext(events) for _ in range(3)]
         finally:
             await events.aclose()
 
-    assert "ready" in anyio.run(pull_ready)
+    ready, message, cursor = (sse(frame) for frame in anyio.run(pull))
+    assert ready == (
+        "ready",
+        {"ok": True, "resumed": True, "cursor": {room: "m-old", other: "m-img"}},
+    )
+    assert message[0] == "message"
+    assert obj(obj(message[1])["message"])["id"] == "m-new"
+    assert cursor == ("cursor", {"ok": True, "cursor": {room: "m-new"}})
 
 
-def test_messages_expose_attachment_metadata(tmp_path: Path) -> None:
-    reader = Reader(profile_at(tmp_path))
-    room_id = next(m.room_id for m in reader.snapshot().messages if m.id == "m-img")
-    with TestClient(create_app(TOKEN, reader)) as client:
-        response = client.get(
-            "/messages",
-            params={"roomId": room_id, "limit": 10},
-            headers={"Authorization": f"Bearer {TOKEN}"},
+def test_a_failed_read_ends_the_stream_with_an_error_event(reader: Reader) -> None:
+    snapshot = reader.snapshot()
+
+    async def pull() -> list[str]:
+        events = stream_events(
+            UnreadableReader(),
+            snapshot,
+            initial_positions(snapshot, {}),
+            resumed=False,
+            poll_seconds=0,
         )
-    payload = Messages.model_validate_json(response.content)
-    image = next(m for m in payload.messages if m.id == "m-img")
-    assert image.content_type == "image/jpeg"
-    assert image.has_attachment is True
+        return [frame async for frame in events]
 
-
-def test_media_byte_route_is_absent(tmp_path: Path) -> None:
-    with TestClient(create_app(TOKEN, Reader(profile_at(tmp_path)))) as client:
-        response = client.get("/media", headers={"Authorization": f"Bearer {TOKEN}"})
-    assert response.status_code == 404
+    frames = [sse(frame) for frame in anyio.run(pull)]
+    assert [name for name, _ in frames] == ["ready", "error"]
+    error = obj(frames[1][1])
+    assert error["ok"] is False
+    assert obj(error["error"])["code"] == "INTERNAL"

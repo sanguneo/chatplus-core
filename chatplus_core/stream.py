@@ -1,10 +1,10 @@
 # Copyright (c) 2026 chatplus-core contributors
-"""Pure core for the F2 message stream: per-room positions, resume, framing.
+"""Pure core for the message stream: per-room positions, resume and framing.
 
 The SSE endpoint is a thin real-time loop around these pure functions. A room
-first seen after the stream starts begins "from now" (its backlog is not
-replayed) - a documented gap rather than a silent full replay. A resume hint
-whose message id is no longer present also falls back to "from now".
+the client does not name starts from now, and so does a room first seen after
+the stream starts (its backlog is not replayed). A named room resumes after its
+message id; a cursor that cannot be honoured is refused, never downgraded to now.
 """
 
 from collections.abc import Iterable
@@ -18,33 +18,44 @@ Positions = dict[str, Key]
 MIN_KEY: Key = (datetime.min.replace(tzinfo=UTC), "")
 
 
+class ResumeError(ValueError):
+    """A resume cursor is malformed, names a room twice, or names nothing cached."""
+
+
 def _key(message: Message) -> Key:
     """Order a message by (sent_at, id), matching the reader's ordering."""
     return (message.sent_at, message.id)
 
 
 def parse_since(values: Iterable[str]) -> dict[str, str]:
-    """Parse repeated `<roomId>:<messageId>` resume hints (roomId is colon-free hex)."""
+    """Parse repeated `<roomId>:<messageId>` cursors, refusing malformed or repeated rooms.
+
+    Room ids are colon-free hex, so the first colon ends the room id even when a
+    message id carries colons of its own.
+    """
     result: dict[str, str] = {}
     for value in values:
         room, separator, message_id = value.partition(":")
-        if separator and room and message_id:
-            result[room] = message_id
+        if not (separator and room and message_id) or room in result:
+            raise ResumeError
+        result[room] = message_id
     return result
 
 
 def initial_positions(snapshot: Snapshot, since: dict[str, str]) -> Positions:
-    """Seed each room's position: a resumed message id if still present, else from now."""
+    """Seed each room's position: a named room at its message id, any other from now."""
+    by_room: dict[str, list[Message]] = {room.id: [] for room in snapshot.rooms}
+    for message in snapshot.messages:
+        by_room.setdefault(message.room_id, []).append(message)
     positions: Positions = {}
-    for room in snapshot.rooms:
-        room_messages = [m for m in snapshot.messages if m.room_id == room.id]
-        resumed: Key | None = None
-        wanted = since.get(room.id)
-        if wanted is not None:
-            match = next((m for m in room_messages if m.id == wanted), None)
-            if match is not None:
-                resumed = _key(match)
-        positions[room.id] = resumed or (_key(room_messages[-1]) if room_messages else MIN_KEY)
+    for room_id, wanted in since.items():
+        match = next((m for m in by_room.get(room_id, []) if m.id == wanted), None)
+        if match is None:
+            raise ResumeError
+        positions[room_id] = _key(match)
+    for room_id, messages in by_room.items():
+        if room_id not in positions:
+            positions[room_id] = _key(messages[-1]) if messages else MIN_KEY
     return positions
 
 
@@ -77,6 +88,11 @@ def cursor_map(emitted: Iterable[Message]) -> dict[str, str]:
     for message in emitted:
         cursors[message.room_id] = message.id
     return cursors
+
+
+def position_cursor(positions: Positions) -> dict[str, str]:
+    """Return each room's current message id; a room with no messages has none."""
+    return {room_id: key[1] for room_id, key in positions.items() if key[1]}
 
 
 def sse_frame(event: str, data: str) -> str:

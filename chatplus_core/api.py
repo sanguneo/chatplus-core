@@ -1,235 +1,314 @@
 # Copyright (c) 2026 chatplus-core contributors
-"""Authenticated loopback API; only implemented read capabilities are exposed."""
+"""The tsuba adapter over HTTP and SSE; only the reads it performs are declared."""
 
 import binascii
 import hashlib
 import hmac
 import json
-from collections.abc import AsyncGenerator, Callable
-from typing import Annotated, Final, Literal
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from dataclasses import dataclass
+from http import HTTPStatus
+from typing import Annotated, Final
 
 import anyio
 from cryptography.exceptions import InvalidTag
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, params
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from chatplus_core.cursor import CursorError
+from chatplus_core.envelope import ErrorCode, error_body, failure
 from chatplus_core.hive import HiveFormatError
-from chatplus_core.models import Messages, Model, Rooms
-from chatplus_core.reader import Reader, RoomNotFoundError
+from chatplus_core.models import (
+    AccountInfo,
+    AdapterInfo,
+    Capabilities,
+    ContractInfo,
+    Health,
+    MessagesAnswer,
+    Model,
+    ProviderInfo,
+    RoomsAnswer,
+    StreamCursor,
+    StreamMessage,
+    StreamPing,
+    StreamReady,
+)
+from chatplus_core.reader import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    InvalidLimitError,
+    MessageNotFoundError,
+    Reader,
+    RoomNotFoundError,
+    Snapshot,
+)
 from chatplus_core.storage import StorageError
 from chatplus_core.stream import (
     Positions,
+    ResumeError,
     advance,
     cursor_map,
     initial_positions,
     parse_since,
+    position_cursor,
     sse_frame,
 )
 from chatplus_core.values import ValueFormatError
 
+CONTRACT_VERSION: Final = "0.2.5"
+ADAPTER_VERSION: Final = "0.2.0"
 MIN_TOKEN_BYTES: Final = 32
+MAX_ID_LENGTH: Final = 512
+MAX_STREAMS: Final = 8
 STREAM_POLL_SECONDS: Final = 1.0
 STREAM_PING_SECONDS: Final = 15.0
-
-
-async def stream_events(reader: Reader, since: list[str]) -> AsyncGenerator[str, None]:
-    """Emit SSE frames: ready, then per-room message and cursor, with periodic ping."""
-    yield sse_frame("ready", json.dumps({"coverage": "local-cache"}))
-    positions: Positions | None = None
-    quiet = 0.0
-    while True:
-        try:
-            snapshot = await anyio.to_thread.run_sync(reader.snapshot)
-        except (
-            OSError,
-            StorageError,
-            InvalidTag,
-            ValueFormatError,
-            HiveFormatError,
-            UnicodeError,
-            binascii.Error,
-        ):
-            yield sse_frame("error", json.dumps({"code": "STREAM_UNAVAILABLE"}))
-            return
-        if positions is None:
-            positions = initial_positions(snapshot, parse_since(since))
-        else:
-            emitted, positions = advance(snapshot, positions)
-            for message in emitted:
-                yield sse_frame("message", message.model_dump_json(by_alias=True))
-            if emitted:
-                yield sse_frame("cursor", json.dumps(cursor_map(emitted)))
-                quiet = 0.0
-            else:
-                quiet += STREAM_POLL_SECONDS
-                if quiet >= STREAM_PING_SECONDS:
-                    yield sse_frame("ping", "{}")
-                    quiet = 0.0
-        await anyio.sleep(STREAM_POLL_SECONDS)
+FEATURES: Final[dict[str, dict[str, str | int]]] = {
+    "rooms.list": {},
+    "messages.read": {"paging": "before-id", "maxLimit": MAX_LIMIT},
+    "messages.stream": {"resume": "cursor"},
+}
+UNSUPPORTED: Final = (
+    ("GET", "/media"),
+    ("POST", "/send"),
+    ("POST", "/edit"),
+    ("POST", "/delete"),
+    ("POST", "/react"),
+    ("POST", "/read"),
+)
+READ_FAILURES: Final = (
+    OSError,
+    StorageError,
+    InvalidTag,
+    ValueFormatError,
+    HiveFormatError,
+    UnicodeError,
+    binascii.Error,
+)
+UNREADABLE: Final = "The local cache could not be read"
+CHALLENGE: Final = {"WWW-Authenticate": "Bearer"}
 
 
 class ConfigurationError(Exception):
-    """The local API cannot start with the supplied configuration."""
+    """The adapter cannot start with the supplied configuration."""
 
     def __init__(self) -> None:
         """Describe the startup requirement without echoing the token."""
         super().__init__(f"CHATPLUS_TOKEN must contain at least {MIN_TOKEN_BYTES} bytes")
 
 
-class Capabilities(Model):
-    """No send, history completeness, attachments or stream claims."""
-
-    ok: Literal[True] = True
-    provider: Literal["chatplus"] = "chatplus"
-    mode: Literal["read-only"] = "read-only"
-    features: tuple[str, ...] = ("rooms.read", "messages.read", "messages.stream")
-
-
-class ErrorDetail(Model):
-    """A stable error code and a non-sensitive explanation."""
-
-    code: str
-    message: str
-
-
-class Failure(Model):
-    """The shared failure envelope."""
-
-    ok: Literal[False] = False
-    error: ErrorDetail
+def declaration() -> Capabilities:
+    """Declare what this adapter performs end to end, revised by a hash of the content."""
+    draft = Capabilities(
+        contract=ContractInfo(version=CONTRACT_VERSION),
+        adapter=AdapterInfo(name="chatplus-core", version=ADAPTER_VERSION),
+        provider=ProviderInfo(id="chatplus", name="ChattingPlus"),
+        account=AccountInfo(kind="user"),
+        revision="",
+        features=FEATURES,
+    )
+    content = draft.model_dump_json(by_alias=True, exclude={"ok", "revision"})
+    revision = hashlib.sha256(content.encode()).hexdigest()[:16]
+    return draft.model_copy(update={"revision": revision})
 
 
-def failure(status: int, code: str, message: str) -> JSONResponse:
-    """Serialize failures without including exception text or request inputs."""
-    payload = Failure(error=ErrorDetail(code=code, message=message))
-    return JSONResponse(status_code=status, content=payload.model_dump())
+def event(name: str, payload: Model) -> str:
+    """Frame one stream event, leaving keys that do not apply off the wire."""
+    return sse_frame(name, payload.model_dump_json(by_alias=True, exclude_none=True))
+
+
+async def stream_events(
+    reader: Reader,
+    snapshot: Snapshot,
+    positions: Positions,
+    *,
+    resumed: bool,
+    poll_seconds: float = STREAM_POLL_SECONDS,
+) -> AsyncGenerator[str, None]:
+    """Send ready, then each room's newer messages and a cursor, pinging while quiet."""
+    yield event("ready", StreamReady(resumed=resumed, cursor=position_cursor(positions)))
+    quiet = 0.0
+    while True:
+        emitted, positions = advance(snapshot, positions)
+        for message in emitted:
+            yield event("message", StreamMessage(message=message))
+        if emitted:
+            yield event("cursor", StreamCursor(cursor=cursor_map(emitted)))
+            quiet = 0.0
+        elif quiet >= STREAM_PING_SECONDS:
+            yield event("ping", StreamPing())
+            quiet = 0.0
+        await anyio.sleep(poll_seconds)
+        quiet += poll_seconds
+        try:
+            snapshot = await anyio.to_thread.run_sync(reader.snapshot)
+        except READ_FAILURES:
+            yield sse_frame("error", json.dumps(error_body(ErrorCode.INTERNAL, UNREADABLE)))
+            return
+
+
+@dataclass(slots=True)
+class StreamSlots:
+    """Live streams, so one past the limit is refused with BUSY."""
+
+    limit: int
+    live: int = 0
+
+
+async def held(slots: StreamSlots, events: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]:
+    """Hold a slot from a stream's first event until it ends, however it ends.
+
+    Counting from the first event rather than from admission means a response
+    whose body never starts cannot leak a slot.
+    """
+    slots.live += 1
+    try:
+        async for frame in events:
+            yield frame
+    finally:
+        slots.live -= 1
+
+
+async def open_stream(reader: Reader, slots: StreamSlots, since: list[str]) -> Response:
+    """Admit a stream, refusing a cursor it cannot honour before the first event."""
+    if slots.live >= slots.limit:
+        return failure(ErrorCode.BUSY, "The adapter holds as many streams as it will")
+    hints = parse_since(since)
+    snapshot = await anyio.to_thread.run_sync(reader.snapshot)
+    positions = initial_positions(snapshot, hints)
+    return StreamingResponse(
+        held(slots, stream_events(reader, snapshot, positions, resumed=bool(hints))),
+        media_type="text/event-stream",
+        headers={"cache-control": "no-store"},
+    )
 
 
 async def http_error(_request: Request, exc: Exception) -> JSONResponse:
-    """Keep HTTP errors in the shared envelope."""
+    """Keep routing and authentication refusals in the shared envelope."""
     if not isinstance(exc, StarletteHTTPException):
         raise exc
+    headers = exc.headers
     match exc.status_code:
-        case 401:
-            return failure(401, "UNAUTHORIZED", "Bearer token required")
-        case 404:
-            return failure(404, "NOT_FOUND", "Route not found")
-        case 405:
-            return failure(405, "METHOD_NOT_ALLOWED", "Method not allowed")
+        case HTTPStatus.UNAUTHORIZED:
+            return failure(ErrorCode.UNAUTHORIZED, "Bearer token required", headers)
+        case HTTPStatus.NOT_FOUND:
+            return failure(ErrorCode.NOT_FOUND, "No such route", headers)
+        case HTTPStatus.METHOD_NOT_ALLOWED:
+            return failure(
+                ErrorCode.METHOD_NOT_ALLOWED, "The route answers another method", headers
+            )
+        case status if status < HTTPStatus.INTERNAL_SERVER_ERROR:
+            return failure(ErrorCode.INVALID_REQUEST, "Request refused", headers)
         case _:
-            return failure(exc.status_code, "HTTP_ERROR", "HTTP request refused")
+            return failure(ErrorCode.INTERNAL, "The adapter failed", headers)
 
 
-async def bad_request(_request: Request, _exc: Exception) -> JSONResponse:
-    """Avoid reflecting private query arguments in validation failures."""
-    return failure(400, "BAD_REQUEST", "Invalid query parameters")
+def refusal(
+    code: ErrorCode, message: str
+) -> Callable[[Request, Exception], Awaitable[JSONResponse]]:
+    """Build a handler answering one kind of refusal with its fixed code."""
+
+    async def handle(_request: Request, _exc: Exception) -> JSONResponse:
+        return failure(code, message)
+
+    return handle
 
 
-async def missing_room(_request: Request, _exc: Exception) -> JSONResponse:
-    """Distinguish a missing room from an empty conversation."""
-    return failure(404, "NOT_FOUND", "Room is absent from the current local cache")
+REFUSALS: Final[tuple[tuple[type[Exception], ErrorCode, str], ...]] = (
+    (RequestValidationError, ErrorCode.INVALID_REQUEST, "Invalid request parameters"),
+    (InvalidLimitError, ErrorCode.INVALID_REQUEST, "limit is outside the declared maxLimit"),
+    (ResumeError, ErrorCode.INVALID_REQUEST, "The stream cannot resume from that cursor"),
+    (RoomNotFoundError, ErrorCode.NOT_FOUND, "No such room in the local cache"),
+    (MessageNotFoundError, ErrorCode.NOT_FOUND, "No such message in that room"),
+    *((kind, ErrorCode.INTERNAL, UNREADABLE) for kind in READ_FAILURES),
+    (Exception, ErrorCode.INTERNAL, "The adapter failed"),
+)
 
 
-async def unavailable(_request: Request, _exc: Exception) -> JSONResponse:
-    """Withhold filesystem paths and operating-system error details."""
-    return failure(503, "STORAGE_UNAVAILABLE", "Local cache could not be read")
-
-
-async def unsupported(_request: Request, _exc: Exception) -> JSONResponse:
-    """Reject unknown or corrupt storage instead of returning partial data."""
-    return failure(503, "UNSUPPORTED_FORMAT", "Local cache format could not be decoded")
+def _install_error_handlers(app: FastAPI) -> None:
+    """Route every refusal through the shared failure envelope."""
+    app.add_exception_handler(StarletteHTTPException, http_error)
+    for kind, code, message in REFUSALS:
+        app.add_exception_handler(kind, refusal(code, message))
 
 
 _BEARER = HTTPBearer(auto_error=False)
 
 
 def _require_token(expected: bytes) -> Callable[[HTTPAuthorizationCredentials | None], None]:
-    """Build the bearer-token dependency that guards every route of one app."""
+    """Build the bearer-token check every route but /health depends on."""
 
     def authenticate(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_BEARER)],
     ) -> None:
         if credentials is None:
-            raise HTTPException(status_code=401)
+            raise HTTPException(status_code=401, headers=CHALLENGE)
         actual = hashlib.sha256(credentials.credentials.encode("utf-8")).digest()
         if not hmac.compare_digest(expected, actual):
-            raise HTTPException(status_code=401)
+            raise HTTPException(status_code=401, headers=CHALLENGE)
 
     return authenticate
 
 
-def _install_error_handlers(app: FastAPI) -> None:
-    """Route every refusal through the shared failure envelope."""
-    app.add_exception_handler(StarletteHTTPException, http_error)
-    app.add_exception_handler(RequestValidationError, bad_request)
-    app.add_exception_handler(RoomNotFoundError, missing_room)
-    app.add_exception_handler(CursorError, bad_request)
-    handlers = {
-        OSError: unavailable,
-        StorageError: unavailable,
-        InvalidTag: unavailable,
-        ValueFormatError: unsupported,
-        HiveFormatError: unsupported,
-        UnicodeError: unsupported,
-        binascii.Error: unsupported,
-    }
-    for kind, handler in handlers.items():
-        app.add_exception_handler(kind, handler)
+async def not_supported() -> JSONResponse:
+    """Answer a documented route whose feature this adapter does not declare."""
+    return failure(ErrorCode.NOT_SUPPORTED, "This adapter does not declare the route's feature")
+
+
+async def no_icon() -> JSONResponse:
+    """Answer the icon route: this adapter declares no provider icon."""
+    return failure(ErrorCode.NOT_FOUND, "This adapter has no provider icon")
+
+
+def _route_refusals(app: FastAPI, guard: list[params.Depends]) -> None:
+    """Route every documented operation this adapter does not perform, behind the token."""
+    app.add_api_route("/icon", no_icon, methods=["GET"], dependencies=guard)
+    for method, path in UNSUPPORTED:
+        app.add_api_route(path, not_supported, methods=[method], dependencies=guard)
 
 
 def create_app(token: str, reader: Reader | None = None) -> FastAPI:
-    """Build an app whose every exposed route requires the caller's token."""
+    """Build the adapter; every route but /health requires the caller's token."""
     if len(token.encode("utf-8")) < MIN_TOKEN_BYTES:
         raise ConfigurationError
     backend = reader if reader is not None else Reader()
+    slots = StreamSlots(limit=MAX_STREAMS)
+    capabilities = declaration()
     expected = hashlib.sha256(token.encode("utf-8")).digest()
+    guard = [params.Depends(_require_token(expected))]
     app = FastAPI(
-        title="ChatPlus local core",
-        version="0.1.0",
+        title="ChatPlus tsuba adapter",
+        version=ADAPTER_VERSION,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(_require_token(expected))],
-        responses={
-            400: {"model": Failure},
-            401: {"model": Failure},
-            404: {"model": Failure},
-            405: {"model": Failure},
-            503: {"model": Failure},
-            "4XX": {"model": Failure},
-        },
     )
     _install_error_handlers(app)
 
-    @app.get("/capabilities")
-    def capabilities() -> Capabilities:
-        return Capabilities()
+    @app.get("/health")
+    def health() -> Health:
+        return Health()
 
-    @app.get("/rooms")
-    def rooms(limit: Annotated[int, Query(ge=1, le=1000)] = 100) -> Rooms:
-        return backend.rooms(limit)
+    @app.get("/capabilities", dependencies=guard)
+    def describe() -> Capabilities:
+        return capabilities
 
-    @app.get("/messages")
+    @app.get("/rooms", dependencies=guard, response_model_exclude_none=True)
+    def rooms() -> RoomsAnswer:
+        return backend.rooms()
+
+    @app.get("/messages", dependencies=guard, response_model_exclude_none=True)
     def messages(
-        room_id: Annotated[str, Query(alias="roomId", pattern="^[a-f0-9]{64}$")],
-        limit: Annotated[int, Query(ge=1, le=1000)] = 100,
-        cursor: Annotated[str | None, Query(max_length=4096)] = None,
-    ) -> Messages:
-        return backend.messages(room_id, limit, cursor)
+        room_id: Annotated[str, Query(alias="roomId", min_length=1, max_length=MAX_ID_LENGTH)],
+        limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
+        before: Annotated[str | None, Query(min_length=1, max_length=MAX_ID_LENGTH)] = None,
+    ) -> MessagesAnswer:
+        return backend.messages(room_id, limit, before)
 
-    @app.get("/stream")
-    def stream(since: Annotated[list[str] | None, Query()] = None) -> StreamingResponse:
-        return StreamingResponse(
-            stream_events(backend, since or []),
-            media_type="text/event-stream",
-        )
+    @app.get("/stream", dependencies=guard)
+    async def stream(since: Annotated[list[str] | None, Query()] = None) -> Response:
+        return await open_stream(backend, slots, since or [])
 
-    @app.get("/openapi.json", include_in_schema=False)
-    def specification() -> JSONResponse:
-        return JSONResponse(app.openapi())
-
+    _route_refusals(app, guard)
     return app

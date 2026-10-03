@@ -25,6 +25,7 @@ class ValueIssue(StrEnum):
     IDENTITY = "Message identity disagrees with frame key"
     ROOM = "Duplicate room resource"
     DATE = "Invalid or timezone-less cached message date"
+    RECIPIENTS = "Expected cached recipient list"
 
 
 class ValueFormatError(Exception):

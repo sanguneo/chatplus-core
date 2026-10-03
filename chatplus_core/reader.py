@@ -1,14 +1,13 @@
 # Copyright (c) 2026 chatplus-core contributors
-"""Map verified local fields to a bounded, explicitly cache-only API."""
+"""Map verified local fields to the tsuba room and message shapes."""
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Final
+from datetime import UTC, datetime
+from typing import Final, Literal
 
-from chatplus_core.cursor import decode_cursor, encode_cursor
 from chatplus_core.hive import decode_frames
-from chatplus_core.models import Message, Messages, Room, Rooms
+from chatplus_core.models import LastMessage, Message, MessagesAnswer, Room, RoomsAnswer
 from chatplus_core.storage import Profile, StorageError, StorageIssue, discover, read_stable
 from chatplus_core.values import (
     OBJECT_TAG,
@@ -20,6 +19,11 @@ from chatplus_core.values import (
 )
 
 MAX_LIMIT: Final = 1000
+DEFAULT_LIMIT: Final = 50
+ROOM_CAP: Final = 1000
+PREVIEW_CODE_POINTS: Final = 200
+OUTGOING: Final = "Out"
+EARLIEST: Final = datetime.min.replace(tzinfo=UTC)
 
 
 class InvalidLimitError(ValueError):
@@ -32,6 +36,10 @@ class InvalidLimitError(ValueError):
 
 class RoomNotFoundError(Exception):
     """No current cached room has the requested opaque ID."""
+
+
+class MessageNotFoundError(Exception):
+    """The `before` id names no cached message in the requested room."""
 
 
 def mapping(value: Value) -> dict[str | int, Value]:
@@ -53,6 +61,26 @@ def optional_text(value: Value) -> str | None:
     return None if value is None else text(value)
 
 
+def timestamp(value: Value) -> datetime:
+    """Require an ISO 8601 time with an explicit offset."""
+    try:
+        stamp = datetime.fromisoformat(text(value))
+    except ValueError as exc:
+        raise ValueFormatError(ValueIssue.DATE) from exc
+    if stamp.tzinfo is None:
+        raise ValueFormatError(ValueIssue.DATE)
+    return stamp
+
+
+def room_kind(recipients: Value) -> Literal["direct", "group"]:
+    """One other participant is a direct chat; several make a group."""
+    if recipients is None:
+        return "direct"
+    if not isinstance(recipients, list):
+        raise ValueFormatError(ValueIssue.RECIPIENTS)
+    return "group" if len(recipients) > 1 else "direct"
+
+
 def room_identity(epoch: str, resource_url: str) -> str:
     """Account-scoped room id so identical URLs under different accounts never collide."""
     return hashlib.sha256(f"{epoch}\x1f{resource_url}".encode()).hexdigest()
@@ -71,6 +99,45 @@ def records(blob: bytes, profile: Profile, tag: int) -> tuple[Record, ...]:
             raise ValueFormatError(ValueIssue.IDENTITY)
         result.append(value)
     return tuple(result)
+
+
+def to_message(record: Record, room_id: str) -> Message:
+    """Map one cached message; a non-text content type is media, without bytes."""
+    attrs = mapping(record.fields.get(6))
+    content_type = optional_text(attrs.get("Content-Type"))
+    textual = content_type is None or content_type.lower().startswith("text/")
+    sender = optional_text(attrs.get("From")) or ""
+    return Message(
+        id=text(record.fields.get(1)),
+        room_id=room_id,
+        sender=sender,
+        sender_id=sender or None,
+        text=optional_text(attrs.get("TextContent")) or "",
+        kind="text" if textual else "media",
+        sent_at=timestamp(attrs.get("Date")),
+        from_me=optional_text(attrs.get("Direction")) == OUTGOING,
+    )
+
+
+def to_room(room_id: str, attrs: dict[str | int, Value], newest: Message | None) -> Room:
+    """Map one cached conversation, previewing its newest cached message."""
+    date = attrs.get("Date")
+    if date is not None:
+        activity: datetime | None = timestamp(date)
+    else:
+        activity = newest.sent_at if newest is not None else None
+    preview = (
+        LastMessage(text=newest.text[:PREVIEW_CODE_POINTS], from_me=newest.from_me)
+        if newest is not None
+        else None
+    )
+    return Room(
+        id=room_id,
+        title=optional_text(attrs.get("Name")) or "",
+        kind=room_kind(attrs.get("Recipients")),
+        last_activity_at=activity,
+        last_message=preview,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,84 +162,51 @@ class Reader:
         blobs = tuple(read_stable(path) for path in paths)
         if any(read_stable(path) != blob for path, blob in zip(paths, blobs, strict=True)):
             raise StorageError(StorageIssue.CHANGED)
-        folder_records = records(blobs[0], profile, 37)
-        object_records = records(blobs[1], profile, 38)
         epoch = profile.directory.name
-        by_url: dict[str, Room] = {}
-        for folder in folder_records:
-            raw = mapping(folder.fields.get(0))
-            attrs = mapping(folder.fields.get(3))
-            url = text(raw.get("resourceURL"))
-            if url in by_url:
+        folders: dict[str, tuple[str, dict[str | int, Value]]] = {}
+        for folder in records(blobs[0], profile, 37):
+            url = text(mapping(folder.fields.get(0)).get("resourceURL"))
+            if url in folders:
                 raise ValueFormatError(ValueIssue.ROOM)
-            by_url[url] = Room(
-                id=room_identity(epoch, url),
-                title=optional_text(attrs.get("Name")),
-            )
+            folders[url] = (room_identity(epoch, url), mapping(folder.fields.get(3)))
         messages: list[Message] = []
-        for record in object_records:
-            raw = mapping(record.fields.get(0))
-            attrs = mapping(record.fields.get(6))
-            room = by_url.get(text(raw.get("parentFolder")))
-            if room is None:
+        for record in records(blobs[1], profile, OBJECT_TAG):
+            folder = folders.get(text(mapping(record.fields.get(0)).get("parentFolder")))
+            if folder is None:
                 raise StorageError(StorageIssue.ORPHAN)
-            try:
-                stamp = datetime.fromisoformat(text(attrs.get("Date")))
-            except ValueError as exc:
-                raise ValueFormatError(ValueIssue.DATE) from exc
-            if stamp.tzinfo is None:
-                raise ValueFormatError(ValueIssue.DATE)
-            content_type = optional_text(attrs.get("Content-Type"))
-            is_textual = content_type is None or content_type.lower().startswith("text/")
-            messages.append(
-                Message(
-                    id=text(record.fields.get(1)),
-                    room_id=room.id,
-                    text=optional_text(attrs.get("TextContent")),
-                    sent_at=stamp,
-                    direction_raw=optional_text(attrs.get("Direction")),
-                    content_type=content_type,
-                    has_attachment=not is_textual,
-                )
-            )
-        return Snapshot(
-            rooms=tuple(sorted(by_url.values(), key=lambda room: room.id)),
-            messages=tuple(sorted(messages, key=lambda message: (message.sent_at, message.id))),
+            messages.append(to_message(record, folder[0]))
+        messages.sort(key=lambda message: (message.sent_at, message.id))
+        newest = {message.room_id: message for message in messages}
+        rooms = sorted(
+            (to_room(room_id, attrs, newest.get(room_id)) for room_id, attrs in folders.values()),
+            key=lambda room: room.id,
         )
+        rooms.sort(key=lambda room: room.last_activity_at or EARLIEST, reverse=True)
+        return Snapshot(rooms=tuple(rooms), messages=tuple(messages))
 
-    def rooms(self, limit: int = 100) -> Rooms:
-        """Return a bounded room list in opaque-ID order."""
-        if not 1 <= limit <= MAX_LIMIT:
-            raise InvalidLimitError
-        snapshot = self.snapshot()
-        return Rooms(
-            rooms=snapshot.rooms[:limit],
-            total=len(snapshot.rooms),
-            truncated=len(snapshot.rooms) > limit,
-        )
+    def rooms(self) -> RoomsAnswer:
+        """Return the rooms latest activity first, up to the adapter's own cap."""
+        rooms = self.snapshot().rooms
+        return RoomsAnswer(rooms=rooms[:ROOM_CAP], complete=len(rooms) <= ROOM_CAP)
 
-    def messages(self, room_id: str, limit: int = 100, cursor: str | None = None) -> Messages:
-        """Return a bounded, cursor-pageable window; timestamps are not causal order."""
+    def messages(
+        self,
+        room_id: str,
+        limit: int = DEFAULT_LIMIT,
+        before: str | None = None,
+    ) -> MessagesAnswer:
+        """Return a room's newest window, or the one just before a message id, oldest first."""
         if not 1 <= limit <= MAX_LIMIT:
             raise InvalidLimitError
         snapshot = self.snapshot()
         if not any(room.id == room_id for room in snapshot.rooms):
             raise RoomNotFoundError
         selected = tuple(message for message in snapshot.messages if message.room_id == room_id)
-        if cursor is None:
-            older = selected
-        else:
-            before = decode_cursor(cursor, room_id)
-            older = tuple(m for m in selected if (m.sent_at, m.id) < before)
-        page = older[-limit:]
-        next_cursor = (
-            encode_cursor(room_id, page[0].sent_at, page[0].id)
-            if page and len(older) > len(page)
-            else None
-        )
-        return Messages(
-            messages=page,
-            total=len(selected),
-            truncated=next_cursor is not None,
-            next_cursor=next_cursor,
-        )
+        pool = selected
+        if before is not None:
+            index = next((i for i, message in enumerate(selected) if message.id == before), None)
+            if index is None:
+                raise MessageNotFoundError
+            pool = selected[:index]
+        page = pool[-limit:]
+        return MessagesAnswer(messages=page, has_earlier=len(pool) > len(page))

@@ -1,9 +1,11 @@
 # chatplus-core
 
-실행 중인 채팅+ Windows 클라이언트의 **로컬 캐시를 읽는 코어와 HTTP API**입니다.
-tsuba와 별도 저장소이며 TUI는 없습니다. 제공 기능은 방 목록, 커서 페이지네이션 메시지
-조회, SSE 메시지 스트림, 첨부 메타데이터입니다. 실제 발송(설계·합성 테스트만 존재),
-첨부 바이트 다운로드, saya 연결은 아직 없습니다.
+실행 중인 채팅+ Windows 클라이언트의 **로컬 캐시를 읽어 tsuba 어댑터 계약으로 답하는
+읽기 전용 어댑터**입니다. tsuba와 별도 저장소이며 TUI는 없습니다. saya 같은 tsuba
+클라이언트가 설정만으로 붙을 수 있도록, tsuba의 `contract/openapi.json`(0.2.5)을 그대로
+답합니다. 신고하는 기능은 방 목록(`rooms.list`), `before` 페이지네이션 메시지 읽기
+(`messages.read`), SSE 메시지 스트림(`messages.stream`)뿐입니다. 실제 발송(설계·합성
+테스트만 존재)과 첨부 바이트 다운로드는 없습니다.
 
 ## 작동 방식
 
@@ -21,10 +23,10 @@ tsuba와 별도 저장소이며 TUI는 없습니다. 제공 기능은 방 목록
    CRC·패딩을 검증하고 값을 복호화합니다. `values.decode_value`가 Hive 어댑터 직렬화를
    레코드로 해석합니다(모르는 형식은 전체 거절).
 5. **스냅샷**: `reader.snapshot()`이 두 박스를 바이트 동일 이중 읽기로 읽고, 레코드를
-   방·메시지로 매핑해 `(sentAt, id)` 오름차순으로 정렬합니다. 방 ID는 계정 epoch로 범위를
-   한정하며, 클라이언트 창을 열거나 읽음 상태를 바꾸지 않습니다.
-6. **API**: 인증된 루프백 FastAPI가 그 스냅샷을 방 목록·커서 페이지네이션 메시지·SSE
-   스트림·첨부 메타데이터로 노출합니다. 읽기 전용이며 어떤 것도 발송하지 않습니다.
+   tsuba의 방·메시지 모양으로 매핑합니다. 방 ID는 계정 epoch로 범위를 한정하며,
+   클라이언트 창을 열거나 읽음 상태를 바꾸지 않습니다.
+6. **API**: 인증된 FastAPI가 그 스냅샷을 tsuba 계약의 라우트·봉투·오류 코드·SSE 이벤트로
+   답합니다. 읽기 전용이며 어떤 것도 발송하지 않습니다.
 
 열쇠는 실행 중인 클라이언트가 그 데이터베이스를 연 동안에만 자격 증명 저장소에 있으므로,
 클라이언트가 한 번도 연 적 없는 방은 읽을 수 없습니다.
@@ -48,38 +50,48 @@ uv run python -m chatplus_core
 요청 접근 로그는 끕니다. 저장소 키와 메시지를 별도 파일로 내보내지 않습니다.
 
 ```powershell
+curl.exe http://127.0.0.1:8766/health
 curl.exe -H "Authorization: Bearer $env:CHATPLUS_TOKEN" http://127.0.0.1:8766/capabilities
-curl.exe -H "Authorization: Bearer $env:CHATPLUS_TOKEN" "http://127.0.0.1:8766/rooms?limit=100"
+curl.exe -H "Authorization: Bearer $env:CHATPLUS_TOKEN" http://127.0.0.1:8766/rooms
 ```
 
-`/rooms` 응답의 `id`를 `/messages?roomId=<id>&limit=100`에 전달합니다.
-OpenAPI는 인증된 `GET /openapi.json`으로 조회합니다.
-모든 구현된 라우트에 Bearer 인증이 필요하며, 토큰의 해시를 상수 시간으로 비교합니다.
+`/health`를 뺀 모든 라우트에 Bearer 인증이 필요하며, 토큰의 해시를 상수 시간으로 비교합니다.
 
 | 라우트 | 결과 |
 | --- | --- |
-| `GET /capabilities` | `rooms.read`, `messages.read`만 선언 |
-| `GET /rooms?limit=100` | 방 ID·캐시된 이름, 전체 캐시 방 수, 잘림 여부 |
-| `GET /messages?roomId=…&limit=100&cursor=…` | 지정 방의 캐시 시간 구간, `nextCursor`로 역방향 페이지네이션 |
-| `GET /stream?since=<roomId>:<id>` | SSE: `ready`→방별 `message`+`cursor`, 조용하면 `ping`, 오류 시 `error` |
-| `GET /openapi.json` | 현재 실행 코드에서 생성한 별도 API 계약 |
+| `GET /health` | `{"ok": true}`, 토큰 없이 |
+| `GET /capabilities` | 계약 0.2.5, `account.kind: user`, 기능 `rooms.list`·`messages.read`(`paging: before-id`, `maxLimit: 1000`)·`messages.stream`(`resume: cursor`) |
+| `GET /rooms` | 최근 활동 순 방 목록, `complete` |
+| `GET /messages?roomId=…&limit=50&before=<id>` | 오래된 것부터, `hasEarlier` |
+| `GET /stream?since=<roomId>:<id>` | SSE: `ready`→`message`…→`cursor`, 조용하면 `ping`, 읽기 실패 시 `error` 후 종료 |
+| `GET /media`, `POST /send`·`/edit`·`/delete`·`/react`·`/read` | 기능을 신고하지 않으므로 `501 NOT_SUPPORTED` |
+| `GET /icon` | 제공자 아이콘이 없으므로 `404 NOT_FOUND` |
 
-`limit`는 1~1000입니다. 메시지는 `sentAt`, `id` 오름차순이며,
-그 순서에서 마지막 `limit`개를 반환합니다. 이는 인과 순서나 서버 수신 순서가 아닙니다.
-`nextCursor`가 있으면 그 값을 `cursor`로 넘겨 더 과거를 받고, `nextCursor: null`이면 그 방
-히스토리의 시작입니다. 커서는 방에 묶인 불투명 토큰이라 다른 방·손상된 값은 400,
-계정이 바뀌어 방 ID가 사라지면 404로 답합니다(조용한 downgrade 없음).
-`text: null`은 읽을 수 있는 `TextContent`가 없다는 뜻입니다.
-`contentType`은 원본 MIME, `hasAttachment`는 비텍스트(첨부·리치) 메시지 여부입니다.
-XML·리치 카드·첨부파일을 임의의 평문으로 변환하지 않으며, 첨부 바이트는 제공하지 않습니다
-(로컬 캐시가 내용을 보관하지 않음).
-`directionRaw`는 원본의 방향 문자열이며 검증되지 않은 의미로 정규화하지 않습니다.
+`limit`는 1~1000(기본 50)입니다. `before`가 없으면 가장 새로운 `limit`개를, 있으면 그 id
+바로 앞의 `limit`개를 `sentAt`, `id` 오름차순으로 돌려줍니다. 이는 인과 순서나 서버 수신
+순서가 아닙니다. `hasEarlier: false`면 그 방 캐시 이력의 시작이고, 그 방에 없는 `before`는
+404입니다.
+
+방과 메시지는 캐시 필드에서 이렇게 옮깁니다.
+
+- 방 `title`은 `Name`, `kind`는 `Recipients`가 둘 이상이면 `group`, 아니면 `direct`,
+  `lastActivityAt`은 방의 `Date`, `lastMessage`는 캐시에서 가장 새로운 메시지(앞 200자)입니다.
+- **`unread`는 늘 0입니다.** 캐시의 읽음 상태를 아직 매핑하지 않았으므로 안 읽은 수를
+  주장하지 않습니다.
+- 메시지 `sender`·`senderId`는 `From`, `fromMe`는 `Direction`이 `Out`인지,
+  `text`는 `TextContent`(없으면 빈 문자열)입니다. `Content-Type`이 `text/`가 아니면
+  `kind: media`이며, 첨부 바이트와 `attachments`는 제공하지 않습니다(로컬 캐시가 내용을
+  보관하지 않음). XML·리치 카드를 임의의 평문으로 바꾸지 않습니다.
+- 해당하지 않는 키는 `null`이 아니라 아예 빠집니다.
+
+스트림은 이름을 댄 방을 그 메시지 id 뒤부터 이어 보내고, 이름을 대지 않은 방과 스트림 도중
+처음 보인 방은 지금부터 보냅니다. 형식이 틀렸거나, 같은 방을 두 번 댔거나, 캐시에 없는 방·
+메시지를 가리키는 커서는 지금부터로 낮추지 않고 400으로 거절합니다. 스트림은 동시에 8개까지
+받고, 아홉 번째는 `503 BUSY`입니다.
 
 ## 보장 범위
 
-- `coverage: "local-cache"`만 주장합니다. 휴대폰이나 서버의 전체 이력이 아닙니다.
-- 응답의 `total`은 이번 캐시 읽기에서 해당하는 레코드 수입니다.
-  `truncated: true`는 요청 한도로 잘렸다는 뜻이며, 완전한 이력이 있다는 뜻이 아닙니다.
+- 로컬 캐시만 읽습니다. 휴대폰이나 서버의 전체 이력이 아닙니다.
 - 방 ID는 `SHA-256(계정 epoch ‖ 방 resource URL)`입니다. 계정 간 동일 URL이 충돌하지
   않으며, 원본 URL과 epoch는 API에 노출하지 않습니다.
 - Hive 프레임을 순서대로 재생하여 같은 키의 교체와 삭제를 반영합니다.
@@ -94,10 +106,11 @@ XML·리치 카드·첨부파일을 임의의 평문으로 변환하지 않으�
 - 읽기는 클라이언트 창을 열거나 읽음 상태를 바꾸지 않습니다.
   RCS 프로토콜, 로그인, 토큰 갱신을 재구현하지 않습니다.
 
-잘못된 쿼리는 400, 인증 실패는 401, 없는 방은 404,
-로컬 환경/동시 변경 문제는 503 `STORAGE_UNAVAILABLE`,
-지원하지 않거나 손상된 형식은 503 `UNSUPPORTED_FORMAT`으로 답합니다.
-자동 재시도는 하지 않습니다.
+모든 실패는 tsuba 봉투 `{"ok": false, "error": {"code", "message"}}`이고 코드마다 상태가
+하나입니다. 잘못된 요청은 400 `INVALID_REQUEST`, 인증 실패는 401 `UNAUTHORIZED`, 없는
+라우트·방·메시지는 404 `NOT_FOUND`, 다른 메서드는 405 `METHOD_NOT_ALLOWED`, 신고하지 않은
+기능은 501 `NOT_SUPPORTED`, 로컬 캐시를 읽거나 풀지 못하면 500 `INTERNAL`(메시지에 경로나
+계정 정보 없음), 스트림이 꽉 차면 503 `BUSY`입니다. 자동 재시도는 하지 않습니다.
 
 ## 검증
 
@@ -110,32 +123,40 @@ uv run python -m tools.verify_live
 uv run python -m tools.verify_socket
 ```
 
-합성 테스트는 실제 계정 자료를 사용하지 않습니다.
-`tools.verify_live`는 실제 로컬 파일을 API에 연결하지만 방·본문·키 대신 개수만 출력합니다.
+합성 테스트는 실제 계정 자료를 사용하지 않습니다. 필드 이름과 값 모양만 실제 캐시에서
+관측한 구조(`Recipients` 목록, `From` 문자열, `Direction` `In`/`Out`)를 따릅니다.
+`tools.verify_live`는 실제 로컬 파일을 tsuba 라우트에 연결하지만 방·본문·키 대신 개수만
+출력하고, 가장 큰 방을 `before`로 거꾸로 넘겨 전체 이력과 같은지 확인합니다.
 `tools.verify_socket`은 비어 있는 루프백 포트를 직접 골라 `CHATPLUS_PORT`로
 실제 서버를 별도 프로세스로 띄우고, 그 포트의 준비 로그를 기다린 뒤 TCP로
-무인증 거절(401)과 인증 조회(200)를 확인한 다음 자신이 띄운 프로세스만 종료합니다.
+`/health` 200, 무인증 401, 인증 200을 확인한 다음 자신이 띄운 프로세스만 종료합니다.
 
 2026-10-03 확인한 클라이언트는 `com.sktelecom.torchlight` 1.5.4.6입니다.
-117개 합성 테스트가 통과했고, 실제 캐시에서 43개 방·140개 메시지(본문 109개, 첨부 메타
-26개)를 조회했습니다. 실제 루프백 TCP 서버로 무인증 401·인증 200·방 43개를, 가장 큰
-방(26개)은 역방향 페이지네이션으로 전체 히스토리와 정확히 일치함을 확인했습니다.
-테스트 메시지는 보내지 않았습니다. 다른 클라이언트 버전 호환성은 아직 입증하지 않았습니다.
+170개 합성 테스트가 통과했고, 실제 캐시에서 43개 방(모두 `direct`)·140개 메시지(본문 109개,
+`media` 26개, 내가 보낸 것 14개)를 조회했습니다. 가장 큰 방(26개)은 `before` 페이지네이션이
+전체 이력과 정확히 일치했고, 실제 루프백 TCP 서버로 health 200·무인증 401·인증 200·방
+43개를 확인했습니다. 테스트 메시지는 보내지 않았습니다. 다른 클라이언트 버전 호환성은 아직
+입증하지 않았습니다.
 
-## 계약(openapi.json)
+## 계약
 
-`openapi.json`은 이 저장소가 공개하는 유일한 계약입니다. saya 같은 클라이언트는 이 파일을
-바이트 그대로 복사·핑할 수 있습니다(카카오톡 코어 방식). 코드에서 재생성하려면
-`uv run python -m tools.dump_contract`를 실행합니다. `tests/test_contract.py`가 실행 중인 앱과 이
-파일이 바이트까지 일치하는지 검사하므로, 둘이 어긋나면 테스트가 실패합니다.
+이 어댑터가 답하는 계약은 tsuba의 것입니다. `contract/tsuba.openapi.json`은 tsuba
+`contract/openapi.json`(0.2.5)의 바이트 그대로 복사본이며, saya가 고정한 사본과 SHA-256이
+같습니다. `.gitattributes`가 Windows에서 이 파일의 줄바꿈을 바꾸지 않게 합니다.
+
+`tests/test_contract.py`는 그 사본으로 다음을 검사합니다: 바이트가 고정값과 같은지, 계약
+버전, 오류 코드와 상태, 문서의 모든 라우트가 라우팅되는지(신고한 기능은 답하고, 신고하지 않은
+기능은 501), `/health`를 뺀 모든 라우트가 토큰을 요구하는지, `/capabilities`·`/rooms`·
+`/messages`·오류 응답·스트림 이벤트가 문서의 스키마와 맞는지. 계약을 올리려면 tsuba에서
+새 바이트를 복사하고 고정값과 `CONTRACT_VERSION`을 함께 바꿉니다.
 
 ## 후속 작업
 
 상세 의존성, 불변식, 반례, 실행 절차와 완료 조건은
 [후속 작업 계획](.omo/plans/chatplus-core-followup.md)에 정리합니다. 계획의 B2(계정 신원),
-F1(페이지네이션), F2(SSE), F3(발송 상태기계 설계), F4(첨부 메타데이터)는 구현됐고,
-F3 실제 전송·스냅샷 세대 일관성(C2)·saya 연결은 아직 남아 있습니다.
-현재 API는 tsuba 계약의 구현이나 saya 연결 완료를 뜻하지 않습니다.
+F1(페이지네이션), F2(SSE), F3(발송 상태기계 설계), F4(첨부 메타데이터)와 tsuba 계약
+전환(§14)은 구현됐습니다. 남은 것은 saya 연결 확인, F3 실제 전송, 읽음 상태(`unread`) 매핑,
+스냅샷 세대 일관성(C2)입니다.
 
 공식 PC 지원 조건과 외부 형식 근거:
 

@@ -1,5 +1,10 @@
 # Copyright (c) 2026 chatplus-core contributors
-"""Build independent synthetic Hive values and encrypted local boxes."""
+"""Build independent synthetic Hive values and encrypted local boxes.
+
+Field names and value shapes follow the structure observed in a real cache
+(`Recipients` a list, `From` a string, `Direction` `In`/`Out`); every value is
+synthetic.
+"""
 
 import struct
 from pathlib import Path
@@ -9,7 +14,11 @@ from chatplus_core.values import Record, Value
 from tests.test_hive import KEY, frame
 
 
-def encode(value: Value) -> bytes:
+def sized(tag: int, items: list[bytes]) -> bytes:
+    return bytes([tag]) + len(items).to_bytes(4, "little") + b"".join(items)
+
+
+def encode_scalar(value: Value) -> bytes:
     match value:
         case None:
             return b"\0"
@@ -20,27 +29,47 @@ def encode(value: Value) -> bytes:
         case str():
             payload = value.encode("utf-8")
             return b"\x04" + len(payload).to_bytes(4, "little") + payload
+        case _:
+            raise TypeError(type(value).__name__)
+
+
+def encode(value: Value) -> bytes:
+    match value:
+        case list():
+            return sized(0x0A, [encode(item) for item in value])
         case dict():
-            return (
-                b"\x0b"
-                + len(value).to_bytes(4, "little")
-                + b"".join(encode(key) + encode(item) for key, item in value.items())
-            )
+            return sized(0x0B, [encode(key) + encode(item) for key, item in value.items()])
         case Record():
             return bytes([value.tag, len(value.fields)]) + b"".join(
                 bytes([index]) + encode(item) for index, item in value.fields.items()
             )
         case _:
-            raise TypeError(type(value).__name__)
+            return encode_scalar(value)
 
 
 def profile_at(directory: Path) -> Profile:
     folders = [
         Record(
-            37, {0: {"resourceURL": "https://synthetic.invalid/room/a"}, 3: {"Name": "same title"}}
+            37,
+            {
+                0: {"resourceURL": "https://synthetic.invalid/room/a"},
+                3: {
+                    "Name": "same title",
+                    "Date": "2026-01-01T02:00:00Z",
+                    "Recipients": ["sip:one@synthetic.invalid"],
+                },
+            },
         ),
         Record(
-            37, {0: {"resourceURL": "https://synthetic.invalid/room/b"}, 3: {"Name": "same title"}}
+            37,
+            {
+                0: {"resourceURL": "https://synthetic.invalid/room/b"},
+                3: {
+                    "Name": "same title",
+                    "Date": "2026-01-01T04:00:00Z",
+                    "Recipients": ["sip:two@synthetic.invalid", "sip:three@synthetic.invalid"],
+                },
+            },
         ),
     ]
     messages = [
@@ -49,7 +78,12 @@ def profile_at(directory: Path) -> Profile:
             {
                 0: {"parentFolder": "https://synthetic.invalid/room/a"},
                 1: "m-old",
-                6: {"Date": "2026-01-01T01:00:00Z", "TextContent": "old", "Direction": "received"},
+                6: {
+                    "Date": "2026-01-01T01:00:00Z",
+                    "TextContent": "old",
+                    "Direction": "In",
+                    "From": "sip:one@synthetic.invalid",
+                },
             },
         ),
         Record(
@@ -57,7 +91,13 @@ def profile_at(directory: Path) -> Profile:
             {
                 0: {"parentFolder": "https://synthetic.invalid/room/a"},
                 1: "m-new",
-                6: {"Date": "2026-01-01T02:00:00Z", "TextContent": "new", "Direction": "sent"},
+                6: {
+                    "Date": "2026-01-01T02:00:00Z",
+                    "TextContent": "new",
+                    "Direction": "Out",
+                    "From": "sip:me@synthetic.invalid",
+                    "Content-Type": "text/plain",
+                },
             },
         ),
         Record(
@@ -65,7 +105,12 @@ def profile_at(directory: Path) -> Profile:
             {
                 0: {"parentFolder": "https://synthetic.invalid/room/b"},
                 1: "m-rich",
-                6: {"Date": "2026-01-01T03:00:00Z", "MessageBody": "<rich/>"},
+                6: {
+                    "Date": "2026-01-01T03:00:00Z",
+                    "MessageBody": "<rich/>",
+                    "Direction": "In",
+                    "From": "sip:two@synthetic.invalid",
+                },
             },
         ),
         Record(
@@ -73,7 +118,12 @@ def profile_at(directory: Path) -> Profile:
             {
                 0: {"parentFolder": "https://synthetic.invalid/room/b"},
                 1: "m-img",
-                6: {"Date": "2026-01-01T04:00:00Z", "Content-Type": "image/jpeg"},
+                6: {
+                    "Date": "2026-01-01T04:00:00Z",
+                    "Content-Type": "image/jpeg",
+                    "Direction": "In",
+                    "From": "sip:three@synthetic.invalid",
+                },
             },
         ),
     ]

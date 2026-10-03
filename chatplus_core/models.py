@@ -1,5 +1,9 @@
 # Copyright (c) 2026 chatplus-core contributors
-"""Public read-only response models; no raw storage or credential fields."""
+"""tsuba-contract answers; no raw storage or credential fields.
+
+A key that does not apply is absent, never null: answers are serialized
+without `None` values, so optional fields stay off the wire.
+"""
 
 from datetime import datetime
 from typing import ClassVar, Literal
@@ -9,7 +13,7 @@ from pydantic.alias_generators import to_camel
 
 
 class Model(BaseModel):
-    """Immutable API value with camel-case wire fields."""
+    """Immutable wire value with camel-case field names."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(
         frozen=True,
@@ -18,42 +22,120 @@ class Model(BaseModel):
     )
 
 
-class Room(Model):
-    """An opaque local room identity and the cached room name."""
+class Health(Model):
+    """Liveness, answered without a token."""
+
+    ok: Literal[True] = True
+
+
+class ContractInfo(Model):
+    """The contract version this adapter answers."""
+
+    version: str
+
+
+class AdapterInfo(Model):
+    """The adapter's own name and release."""
+
+    name: str
+    version: str
+
+
+class ProviderInfo(Model):
+    """The messenger behind the adapter."""
 
     id: str
-    title: str | None
+    name: str
+
+
+class AccountInfo(Model):
+    """Whose view of the messenger the adapter reads."""
+
+    kind: Literal["user", "bot", "official"]
+
+
+class Capabilities(Model):
+    """What the adapter performs end to end; an absent feature is unsupported."""
+
+    ok: Literal[True] = True
+    contract: ContractInfo
+    adapter: AdapterInfo
+    provider: ProviderInfo
+    account: AccountInfo
+    revision: str
+    features: dict[str, dict[str, str | int]]
+
+
+class LastMessage(Model):
+    """The newest message of a room, for a list preview."""
+
+    text: str
+    from_me: bool
+
+
+class Room(Model):
+    """A conversation as the account's own client lists it."""
+
+    id: str
+    title: str
+    kind: Literal["direct", "group", "channel"]
+    unread: int = 0
+    last_activity_at: datetime | None = None
+    last_message: LastMessage | None = None
 
 
 class Message(Model):
-    """Cached text, without claiming full rich-message or delivery coverage."""
+    """One cached message; `text` is empty when it carries none."""
 
     id: str
     room_id: str
-    text: str | None
+    sender: str
+    sender_id: str | None = None
+    text: str
+    kind: Literal["text", "media", "service"]
     sent_at: datetime
-    direction_raw: str | None
-    content_type: str | None = None
-    has_attachment: bool = False
+    from_me: bool
 
 
-class Rooms(Model):
-    """A bounded list from this local cache read."""
+class RoomsAnswer(Model):
+    """The rooms, and whether the adapter stopped at its own cap."""
 
     ok: Literal[True] = True
     rooms: tuple[Room, ...]
-    total: int
-    truncated: bool
-    coverage: Literal["local-cache"] = "local-cache"
+    complete: bool
 
 
-class Messages(Model):
-    """Newest cached records, returned in ascending timestamp and ID order."""
+class MessagesAnswer(Model):
+    """A window of one room's messages, oldest first."""
 
     ok: Literal[True] = True
     messages: tuple[Message, ...]
-    total: int
-    truncated: bool
-    next_cursor: str | None = None
-    coverage: Literal["local-cache"] = "local-cache"
-    order: Literal["timestamp-id"] = "timestamp-id"
+    has_earlier: bool
+
+
+class StreamReady(Model):
+    """The first stream event: whether it resumed, and each room's position."""
+
+    ok: Literal[True] = True
+    resumed: bool
+    cursor: dict[str, str]
+
+
+class StreamMessage(Model):
+    """A message the stream delivers."""
+
+    ok: Literal[True] = True
+    message: Message
+
+
+class StreamCursor(Model):
+    """The last message id per room, sent after the messages it covers."""
+
+    ok: Literal[True] = True
+    cursor: dict[str, str]
+
+
+class StreamPing(Model):
+    """A keep-alive while the stream is quiet."""
+
+    ok: Literal[True] = True

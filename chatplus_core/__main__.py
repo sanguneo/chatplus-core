@@ -6,7 +6,7 @@ from typing import Final
 
 import uvicorn
 
-from chatplus_core.api import create_app
+from chatplus_core.api import MAX_STREAMS, create_app
 
 DEFAULT_PORT: Final = 8766
 MIN_PORT: Final = 1024
@@ -43,7 +43,8 @@ def main() -> None:
         host="127.0.0.1",
         port=resolve_port(),
         access_log=False,
-        limit_concurrency=8,
+        # Above the stream limit, so a ninth stream gets BUSY and reads still answer.
+        limit_concurrency=4 * MAX_STREAMS,
     )
 
 
