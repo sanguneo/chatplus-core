@@ -1,0 +1,38 @@
+[project]
+name = "chatplus-core"
+version = "0.1.0"
+description = "Local, read-only ChattingPlus Windows integration"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=46",
+  "fastapi>=0.115",
+  "pydantic>=2",
+  "uvicorn>=0.34",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "basedpyright>=1.21", "ruff>=0.8", "httpx2>=1"]
+
+[tool.basedpyright]
+typeCheckingMode = "all"
+pythonVersion = "3.11"
+pythonPlatform = "Windows"
+venvPath = "."
+venv = ".venv"
+include = ["chatplus_core", "tests", "tools"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["COM812", "ISC001", "D203", "D213"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "D", "PLR2004"]
+"tools/**/*.py" = ["T201", "INP001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers"]
