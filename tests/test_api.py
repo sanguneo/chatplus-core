@@ -100,3 +100,38 @@ def test_specification_matches_validation_status(tmp_path: Path) -> None:
     assert b'"400"' in response.content
     assert b'"422"' not in response.content
     assert TOKEN.encode() not in response.content
+
+
+def test_messages_pagination_over_http(tmp_path: Path) -> None:
+    reader = Reader(profile_at(tmp_path))
+    room_id = next(m.room_id for m in reader.snapshot().messages if m.id == "m-new")
+    with TestClient(create_app(TOKEN, reader)) as client:
+        first = client.get(
+            "/messages",
+            params={"roomId": room_id, "limit": 1},
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        page_one = Messages.model_validate_json(first.content)
+        assert page_one.next_cursor is not None
+        second = client.get(
+            "/messages",
+            params={"roomId": room_id, "limit": 1, "cursor": page_one.next_cursor},
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        page_two = Messages.model_validate_json(second.content)
+    assert [m.id for m in page_one.messages] == ["m-new"]
+    assert [m.id for m in page_two.messages] == ["m-old"]
+    assert page_two.next_cursor is None
+
+
+def test_malformed_cursor_is_bad_request(tmp_path: Path) -> None:
+    reader = Reader(profile_at(tmp_path))
+    room_id = next(m.room_id for m in reader.snapshot().messages if m.id == "m-new")
+    with TestClient(create_app(TOKEN, reader)) as client:
+        response = client.get(
+            "/messages",
+            params={"roomId": room_id, "cursor": "not-a-cursor"},
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+    assert response.status_code == 400
+    assert Failure.model_validate_json(response.content).error.code == "BAD_REQUEST"

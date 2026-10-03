@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from chatplus_core.cursor import CursorError
 from chatplus_core.hive import HiveFormatError
 from chatplus_core.models import Messages, Model, Rooms
 from chatplus_core.reader import Reader, RoomNotFoundError
@@ -131,6 +132,7 @@ def create_app(token: str, reader: Reader | None = None) -> FastAPI:
     app.add_exception_handler(StarletteHTTPException, http_error)
     app.add_exception_handler(RequestValidationError, bad_request)
     app.add_exception_handler(RoomNotFoundError, missing_room)
+    app.add_exception_handler(CursorError, bad_request)
     handlers = {
         OSError: unavailable,
         StorageError: unavailable,
@@ -155,8 +157,9 @@ def create_app(token: str, reader: Reader | None = None) -> FastAPI:
     def messages(
         room_id: Annotated[str, Query(alias="roomId", pattern="^[a-f0-9]{64}$")],
         limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+        cursor: Annotated[str | None, Query(max_length=4096)] = None,
     ) -> Messages:
-        return backend.messages(room_id, limit)
+        return backend.messages(room_id, limit, cursor)
 
     @app.get("/openapi.json", include_in_schema=False)
     def specification() -> JSONResponse:

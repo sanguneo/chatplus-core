@@ -52,5 +52,6 @@ class Messages(Model):
     messages: tuple[Message, ...]
     total: int
     truncated: bool
+    next_cursor: str | None = None
     coverage: Literal["local-cache"] = "local-cache"
     order: Literal["timestamp-id"] = "timestamp-id"

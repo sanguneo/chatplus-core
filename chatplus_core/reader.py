@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from chatplus_core.cursor import decode_cursor, encode_cursor
 from chatplus_core.hive import decode_frames
 from chatplus_core.models import Message, Messages, Room, Rooms
 from chatplus_core.storage import Profile, StorageError, StorageIssue, discover, read_stable
@@ -146,14 +147,28 @@ class Reader:
             truncated=len(snapshot.rooms) > limit,
         )
 
-    def messages(self, room_id: str, limit: int = 100) -> Messages:
-        """Return the newest cached time window; timestamps are not causal order."""
+    def messages(self, room_id: str, limit: int = 100, cursor: str | None = None) -> Messages:
+        """Return a bounded, cursor-pageable window; timestamps are not causal order."""
         if not 1 <= limit <= MAX_LIMIT:
             raise InvalidLimitError
         snapshot = self.snapshot()
         if not any(room.id == room_id for room in snapshot.rooms):
             raise RoomNotFoundError
         selected = tuple(message for message in snapshot.messages if message.room_id == room_id)
+        if cursor is None:
+            older = selected
+        else:
+            before = decode_cursor(cursor, room_id)
+            older = tuple(m for m in selected if (m.sent_at, m.id) < before)
+        page = older[-limit:]
+        next_cursor = (
+            encode_cursor(room_id, page[0].sent_at, page[0].id)
+            if page and len(older) > len(page)
+            else None
+        )
         return Messages(
-            messages=selected[-limit:], total=len(selected), truncated=len(selected) > limit
+            messages=page,
+            total=len(selected),
+            truncated=next_cursor is not None,
+            next_cursor=next_cursor,
         )
