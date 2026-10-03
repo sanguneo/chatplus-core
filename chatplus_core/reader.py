@@ -52,6 +52,11 @@ def optional_text(value: Value) -> str | None:
     return None if value is None else text(value)
 
 
+def room_identity(epoch: str, resource_url: str) -> str:
+    """Account-scoped room id so identical URLs under different accounts never collide."""
+    return hashlib.sha256(f"{epoch}\x1f{resource_url}".encode()).hexdigest()
+
+
 def records(blob: bytes, profile: Profile, tag: int) -> tuple[Record, ...]:
     """Ignore only the observed version sentinel; reject unexpected records."""
     result: list[Record] = []
@@ -91,6 +96,7 @@ class Reader:
             raise StorageError(StorageIssue.CHANGED)
         folder_records = records(blobs[0], profile, 37)
         object_records = records(blobs[1], profile, 38)
+        epoch = profile.directory.name
         by_url: dict[str, Room] = {}
         for folder in folder_records:
             raw = mapping(folder.fields.get(0))
@@ -99,7 +105,7 @@ class Reader:
             if url in by_url:
                 raise ValueFormatError(ValueIssue.ROOM)
             by_url[url] = Room(
-                id=hashlib.sha256(url.encode("utf-8")).hexdigest(),
+                id=room_identity(epoch, url),
                 title=optional_text(attrs.get("Name")),
             )
         messages: list[Message] = []

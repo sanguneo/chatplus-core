@@ -19,6 +19,16 @@ def test_cached_rooms_with_same_name_keep_distinct_identity(tmp_path: Path) -> N
     assert {room.title for room in result.rooms} == {"same title"}
 
 
+def test_room_ids_are_account_scoped(tmp_path: Path) -> None:
+    one = tmp_path / "account-one"
+    one.mkdir()
+    two = tmp_path / "account-two"
+    two.mkdir()
+    ids_one = {room.id for room in Reader(profile_at(one)).rooms().rooms}
+    ids_two = {room.id for room in Reader(profile_at(two)).rooms().rooms}
+    assert ids_one.isdisjoint(ids_two)
+
+
 def test_newest_time_window_is_chronological_not_frame_order(tmp_path: Path) -> None:
     reader = Reader(profile_at(tmp_path))
     room_id = next(
