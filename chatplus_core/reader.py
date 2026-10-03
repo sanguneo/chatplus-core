@@ -24,6 +24,8 @@ DEFAULT_LIMIT: Final = 50
 ROOM_CAP: Final = 1000
 PREVIEW_CODE_POINTS: Final = 200
 OUTGOING: Final = "Out"
+MOBILE_DIGITS: Final = 12
+MOBILE_PREFIX: Final = "8210"
 EARLIEST: Final = datetime.min.replace(tzinfo=UTC)
 
 Folder = tuple[str, dict[str | int, Value]]
@@ -87,6 +89,21 @@ def room_kind(recipients: Value) -> Literal["direct", "group"]:
 def room_identity(epoch: str, resource_url: str) -> str:
     """Account-scoped room id so identical URLs under different accounts never collide."""
     return hashlib.sha256(f"{epoch}\x1f{resource_url}".encode()).hexdigest()
+
+
+def national_mobile(uri: str) -> str | None:
+    """Return a Korean mobile tel: URI as its national 010 number, else None.
+
+    Only +82 10 XXXXXXXX (12 digits) converts, unambiguously, to 010XXXXXXXX. A
+    landline, a short code or a non-tel URI returns None, so a send refuses rather
+    than guess a number the client might resolve to someone else.
+    """
+    if not uri.startswith("tel:"):
+        return None
+    digits = "".join(ch for ch in uri if ch.isdigit())
+    if len(digits) == MOBILE_DIGITS and digits.startswith(MOBILE_PREFIX):
+        return "0" + digits[2:]
+    return None
 
 
 def records(blob: bytes, profile: Profile, tag: int) -> tuple[Record, ...]:
@@ -214,6 +231,24 @@ class Reader:
         )
         rooms.sort(key=lambda room: room.last_activity_at or EARLIEST, reverse=True)
         return Snapshot(rooms=tuple(rooms), messages=tuple(messages))
+
+    def recipient_number(self, room_id: str) -> str | None:
+        """Return the room's lone mobile recipient in national form, or None if not derivable."""
+        profile = self.profile if self.profile is not None else discover()
+        epoch = profile.directory.name
+        for folder in records(read_stable(profile.directory / "folder.hive"), profile, 37):
+            raw = folder.fields.get(0)
+            if not isinstance(raw, dict) or "resourceURL" not in raw:
+                continue
+            if room_identity(epoch, text(raw.get("resourceURL"))) != room_id:
+                continue
+            attrs = folder.fields.get(3)
+            recipients = attrs.get("Recipients") if isinstance(attrs, dict) else None
+            if not isinstance(recipients, list) or len(recipients) != 1:
+                return None
+            only = recipients[0]
+            return national_mobile(only) if isinstance(only, str) else None
+        return None
 
     def rooms(self) -> RoomsAnswer:
         """Return the rooms latest activity first, up to the adapter's own cap."""

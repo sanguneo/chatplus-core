@@ -10,6 +10,8 @@ from chatplus_core.reader import (
     MessageNotFoundError,
     Reader,
     RoomNotFoundError,
+    national_mobile,
+    room_identity,
 )
 from chatplus_core.storage import Profile, StorageError, StorageIssue, read_stable
 from chatplus_core.values import Record, ValueFormatError, ValueIssue
@@ -225,6 +227,39 @@ def test_recipients_that_are_not_a_list_are_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueFormatError) as error:
         _ = Reader(profile).snapshot()
     assert error.value.issue is ValueIssue.RECIPIENTS
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("tel:+821080092790", "01080092790"),
+        ("tel:+82 10 8009 2790", "01080092790"),
+        ("tel:+8221234567", None),
+        ("tel:+82114", None),
+        ("sip:one@synthetic.invalid", None),
+        ("01080092790", None),
+    ],
+)
+def test_national_mobile_only_converts_unambiguous_mobiles(uri: str, expected: str | None) -> None:
+    assert national_mobile(uri) == expected
+
+
+def test_recipient_number_derives_a_mobile(tmp_path: Path) -> None:
+    profile = profile_at(tmp_path)
+    url = "https://synthetic.invalid/room/mobile"
+    folder = Record(
+        37, {0: {"resourceURL": url}, 3: {"Name": "m", "Recipients": ["tel:+821080092790"]}}
+    )
+    with (tmp_path / "folder.hive").open("ab") as output:
+        _ = output.write(frame("folder-mobile", encode(folder)))
+    reader = Reader(profile)
+    assert reader.recipient_number(room_identity(tmp_path.name, url)) == "01080092790"
+
+
+def test_recipient_number_refuses_a_non_mobile_room(tmp_path: Path) -> None:
+    reader = Reader(profile_at(tmp_path))
+    room = room_of(reader, "m-new")
+    assert reader.recipient_number(room) is None
 
 
 def test_profile_representation_hides_the_key(tmp_path: Path) -> None:
