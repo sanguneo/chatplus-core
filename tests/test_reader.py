@@ -181,6 +181,29 @@ def test_a_folder_path_shared_by_two_folders_is_refused(tmp_path: Path) -> None:
     assert error.value.issue is StorageIssue.ORPHAN
 
 
+def test_a_placeholder_folder_being_created_is_skipped(tmp_path: Path) -> None:
+    profile = profile_at(tmp_path)
+    placeholder = Record(37, {0: None, 3: {}})
+    with (tmp_path / "folder.hive").open("ab") as output:
+        _ = output.write(frame("folder-pending", encode(placeholder)))
+    assert len(Reader(profile).rooms().rooms) == 2
+
+
+def test_a_just_sent_message_without_a_folder_link_is_skipped(tmp_path: Path) -> None:
+    profile = profile_at(tmp_path)
+    pending = Record(
+        38,
+        {
+            0: {},
+            1: "m-pending",
+            6: {"Date": "2026-01-01T06:00:00Z", "TextContent": "x", "Direction": "Out"},
+        },
+    )
+    with (tmp_path / "object.hive").open("ab") as output:
+        _ = output.write(frame("m-pending", encode(pending)))
+    assert len(Reader(profile).snapshot().messages) == 4
+
+
 def test_a_key_put_to_null_holds_no_record(tmp_path: Path) -> None:
     profile = profile_at(tmp_path)
     with (tmp_path / "object.hive").open("ab") as output:

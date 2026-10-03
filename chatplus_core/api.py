@@ -68,8 +68,9 @@ MAX_ID_LENGTH: Final = 512
 MAX_STREAMS: Final = 8
 STREAM_POLL_SECONDS: Final = 1.0
 STREAM_PING_SECONDS: Final = 15.0
-# A conservative cap, refined against the client when the window sender is wired.
-MAX_SEND_LENGTH: Final = 1000
+# The RCS Universal Profile single-message text limit, in code points
+# (GSMA UP; gatewayapi.com/help-center/rcs-character-limits, twilio RCS char count).
+MAX_SEND_LENGTH: Final = 3072
 SEND_CONFIRM_SECONDS: Final = 10.0
 FEATURES: Final[dict[str, dict[str, str | int]]] = {
     "rooms.list": {},

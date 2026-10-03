@@ -97,7 +97,7 @@ def test_a_wired_sender_declares_the_feature_and_sends() -> None:
     with TestClient(create_app(TOKEN, store, sender)) as c:
         features = obj(obj(parse(c.get("/capabilities", headers=AUTH).content))["features"])
         response = c.post("/send", json={"roomId": "r-1", "text": "hello"}, headers=AUTH)
-    assert features["messages.send"] == {"maxLength": 1000, "receipt": "stored"}
+    assert features["messages.send"] == {"maxLength": 3072, "receipt": "stored"}
     assert response.status_code == 200
     message = obj(obj(parse(response.content))["message"])
     assert (message["text"], message["fromMe"], message["roomId"]) == ("hello", True, "r-1")
@@ -114,7 +114,7 @@ def test_reply_to_is_not_supported() -> None:
     assert error_code(response.content) == "NOT_SUPPORTED"
 
 
-@pytest.mark.parametrize("text", ["", "x" * 1001])
+@pytest.mark.parametrize("text", ["", "x" * 3073])
 def test_text_outside_the_length_bound_is_refused(text: str) -> None:
     store = Store([ROOM], [])
     with TestClient(create_app(TOKEN, store, EchoSender(store))) as c:

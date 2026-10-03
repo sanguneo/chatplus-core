@@ -175,7 +175,12 @@ class Reader:
         self.profile: Profile | None = profile
 
     def snapshot(self) -> Snapshot:
-        """Fence two stores against observed changes and decode them fail-closed."""
+        """Fence two stores against observed changes and decode them fail-closed.
+
+        A conversation the client is still creating leaves a placeholder folder and a
+        message with no folder link yet; both are skipped as pending, not refused, so
+        a send in flight never takes the whole read down.
+        """
         profile = self.profile if self.profile is not None else discover()
         paths = (profile.directory / "folder.hive", profile.directory / "object.hive")
         blobs = tuple(read_stable(path) for path in paths)
@@ -184,7 +189,10 @@ class Reader:
         epoch = profile.directory.name
         folders: dict[str, Folder] = {}
         for folder in records(blobs[0], profile, 37):
-            url = text(mapping(folder.fields.get(0)).get("resourceURL"))
+            raw = folder.fields.get(0)
+            if not isinstance(raw, dict) or "resourceURL" not in raw:
+                continue
+            url = text(raw.get("resourceURL"))
             if url in folders:
                 raise ValueFormatError(ValueIssue.ROOM)
             folders[url] = (room_identity(epoch, url), mapping(folder.fields.get(3)))
@@ -193,7 +201,10 @@ class Reader:
             by_path.setdefault(urlsplit(url).path, []).append(folder)
         messages: list[Message] = []
         for record in records(blobs[1], profile, OBJECT_TAG):
-            parent = text(mapping(record.fields.get(0)).get("parentFolder"))
+            raw = record.fields.get(0)
+            parent = raw.get("parentFolder") if isinstance(raw, dict) else None
+            if not isinstance(parent, str) or not parent:
+                continue
             messages.append(to_message(record, folder_of(parent, folders, by_path)[0]))
         messages.sort(key=lambda message: (message.sent_at, message.id))
         newest = {message.room_id: message for message in messages}
