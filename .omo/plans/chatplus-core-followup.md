@@ -257,3 +257,23 @@ P-MEM 자원 상한(§2.5)은 독립, 아무 때나 측정 가능
 ### PBT-1 (§2.1 R1 증명)
 - ⊨ 임의 set/delete 연산열(hypothesis)에 대해 `decode_frames` == 순수 참조 폴드.
   `tests/test_hive_properties.py`, pytest 78 passed(1회 실행), basedpyright 0, ruff 통과.
+
+### B2 계정 신원 (§2.3 해소)
+- ⊨ room id = `sha256(epoch \x1f resourceURL)`, epoch = 프로필 디렉터리 명. 계정 간 동일
+  URL 충돌 방지. API id는 여전히 64 hex라 `/messages` 패턴 불변. `reader.room_identity()`.
+  회귀 테스트 `test_room_ids_are_account_scoped`(구 `sha256(url)`에서 실패).
+
+### F3 발송 설계 (§F3, 설계+합성만)
+- ⊨ `chatplus_core/send.py` 순수 상태기계(Draft→Submitting→Submitted→{Confirmed,Unknown}).
+  금지 전이 타입 예외, draft 보존, Submitted≠delivered, Unknown 자동재시도 없음(새 draft만),
+  크래시→Unknown. `tests/test_send.py` 21개. **실제 전송 코드 없음**(추후 사용자 승인).
+
+### F4 첨부 조사 (§F4 근거, 실측)
+- ⊨ 140개 메시지 모두 Content-Type 보유. 비텍스트 26건(multipart/related 9, GSMA RCS
+  봇/리치카드 JSON ~15, image/jpeg 2). TextContent 없음 31건.
+- ⊨ 프로필 디렉터리에 미디어 바이트 파일 없음(비-.hive는 0바이트 .lock 22개뿐).
+  field0 `contentRedacted`=125/140 → 로컬 캐시는 내용을 상당수 가리고(redact) 바이트를
+  보관하지 않는다. 즉 첨부 바이트는 resourceURL 참조 + 필요시 서버 fetch(RCS 72시간 FAQ 정합).
+- **권고**: 이 읽기전용 로컬 범위에서 `/media` 바이트 서빙은 대부분 뻐밫침 없다(바이트 부재).
+  F4는 **체부 메타데이터 노출**(contentType, hasAttachment/redacted, size 가용시)로 한정하고
+  redacted 콘텐츠의 바이트 다운로드를 약속하지 않는다. 원격 fetch는 범위 밖(⊢, 별도 승인).
