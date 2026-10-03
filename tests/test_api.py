@@ -81,6 +81,7 @@ def test_capabilities_advertise_only_reads(tmp_path: Path) -> None:
     assert Capabilities.model_validate_json(response.content).features == (
         "rooms.read",
         "messages.read",
+        "messages.stream",
     )
 
 

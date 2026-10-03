@@ -86,7 +86,7 @@ class Capabilities(Model):
     ok: Literal[True] = True
     provider: Literal["chatplus"] = "chatplus"
     mode: Literal["read-only"] = "read-only"
-    features: tuple[str, ...] = ("rooms.read", "messages.read")
+    features: tuple[str, ...] = ("rooms.read", "messages.read", "messages.stream")
 
 
 class ErrorDetail(Model):
