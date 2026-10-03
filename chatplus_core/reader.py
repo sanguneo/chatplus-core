@@ -5,6 +5,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final, Literal
+from urllib.parse import urlsplit
 
 from chatplus_core.hive import decode_frames
 from chatplus_core.models import LastMessage, Message, MessagesAnswer, Room, RoomsAnswer
@@ -24,6 +25,8 @@ ROOM_CAP: Final = 1000
 PREVIEW_CODE_POINTS: Final = 200
 OUTGOING: Final = "Out"
 EARLIEST: Final = datetime.min.replace(tzinfo=UTC)
+
+Folder = tuple[str, dict[str | int, Value]]
 
 
 class InvalidLimitError(ValueError):
@@ -87,11 +90,11 @@ def room_identity(epoch: str, resource_url: str) -> str:
 
 
 def records(blob: bytes, profile: Profile, tag: int) -> tuple[Record, ...]:
-    """Ignore only the observed version sentinel; reject unexpected records."""
+    """Skip the version sentinel and keys put to null; reject any other unexpected record."""
     result: list[Record] = []
     for key, payload in decode_frames(blob, profile.key).items():
         value = decode_value(payload)
-        if key == "version" and type(value) is int:
+        if value is None or (key == "version" and type(value) is int):
             continue
         if not isinstance(key, str) or not isinstance(value, Record) or value.tag != tag:
             raise ValueFormatError(ValueIssue.RECORD)
@@ -140,6 +143,22 @@ def to_room(room_id: str, attrs: dict[str | int, Value], newest: Message | None)
     )
 
 
+def folder_of(parent: str, folders: dict[str, Folder], by_path: dict[str, list[Folder]]) -> Folder:
+    """Place a message by its folder's exact URL, else by the one folder at the same path.
+
+    A message sent from this PC can name its folder through another host of the
+    same message store; the path (store and folder id) still names one folder.
+    No match, or more than one, is refused rather than guessed.
+    """
+    exact = folders.get(parent)
+    if exact is not None:
+        return exact
+    candidates = by_path.get(urlsplit(parent).path, [])
+    if len(candidates) != 1:
+        raise StorageError(StorageIssue.ORPHAN)
+    return candidates[0]
+
+
 @dataclass(frozen=True, slots=True)
 class Snapshot:
     """One observed cache view, not a transactional or complete server history."""
@@ -163,18 +182,19 @@ class Reader:
         if any(read_stable(path) != blob for path, blob in zip(paths, blobs, strict=True)):
             raise StorageError(StorageIssue.CHANGED)
         epoch = profile.directory.name
-        folders: dict[str, tuple[str, dict[str | int, Value]]] = {}
+        folders: dict[str, Folder] = {}
         for folder in records(blobs[0], profile, 37):
             url = text(mapping(folder.fields.get(0)).get("resourceURL"))
             if url in folders:
                 raise ValueFormatError(ValueIssue.ROOM)
             folders[url] = (room_identity(epoch, url), mapping(folder.fields.get(3)))
+        by_path: dict[str, list[Folder]] = {}
+        for url, folder in folders.items():
+            by_path.setdefault(urlsplit(url).path, []).append(folder)
         messages: list[Message] = []
         for record in records(blobs[1], profile, OBJECT_TAG):
-            folder = folders.get(text(mapping(record.fields.get(0)).get("parentFolder")))
-            if folder is None:
-                raise StorageError(StorageIssue.ORPHAN)
-            messages.append(to_message(record, folder[0]))
+            parent = text(mapping(record.fields.get(0)).get("parentFolder"))
+            messages.append(to_message(record, folder_of(parent, folders, by_path)[0]))
         messages.sort(key=lambda message: (message.sent_at, message.id))
         newest = {message.room_id: message for message in messages}
         rooms = sorted(

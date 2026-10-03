@@ -40,6 +40,17 @@ def test_enum_does_not_consume_neighboring_fields() -> None:
     assert result == Record(38, {3: Record(42, {0: 7}), 4: "body", 11: Record(61, {0: 0})})
 
 
+def test_hive_datetime_with_timezone_is_decoded() -> None:
+    # Given Hive's built-in DateTimeWithTimezone value in a record's field map,
+    # where the client stores a send time for a message sent from the PC.
+    stamp = bytes([18]) + struct.pack("<d", 1_767_243_600_000) + bytes([1])
+    payload = bytes([38, 1, 10]) + b"\x0b\x01\x00\x00\x00" + text("sendDate") + stamp
+    # When decoded.
+    result = decode_value(payload)
+    # Then the milliseconds and the UTC flag are kept and no byte trails.
+    assert result == Record(38, {10: {"sendDate": Record(18, {0: 1_767_243_600_000, 1: True})}})
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -48,6 +59,7 @@ def test_enum_does_not_consume_neighboring_fields() -> None:
         bytes([255, 0]),
         bytes([38, 2, 0, 0, 0, 0]),
         b"\x09\xff\xff\xff\x7f",
+        bytes([18]) + struct.pack("<d", 1.0),
     ],
 )
 def test_malformed_values_are_rejected(payload: bytes) -> None:

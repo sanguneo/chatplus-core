@@ -55,6 +55,9 @@ MAX_DEPTH: Final = 32
 MAX_SCALAR_TAG: Final = 5
 MAX_LIST_TAG: Final = 10
 MAP_TAG: Final = 11
+# Hive's built-in DateTimeWithTimezoneAdapter (typeId 18, hive v2.2.3
+# lib/src/adapters/date_time_adapter.dart): milliseconds as a Hive int, then isUtc.
+DATETIME_WITH_TIMEZONE_TAG: Final = 18
 OBJECT_TAG: Final = 38
 
 
@@ -161,6 +164,8 @@ class ValueReader:
             return self.mapping(depth)
         if tag in ENUM_ADAPTERS:
             return Record(tag, {0: self.byte()})
+        if tag == DATETIME_WITH_TIMEZONE_TAG:
+            return Record(tag, {0: self.integer(), 1: self.byte() > 0})
         if tag not in ADAPTERS:
             raise ValueFormatError(ValueIssue.TAG)
         fields: dict[int, Value] = {}

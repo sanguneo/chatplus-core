@@ -39,6 +39,8 @@ def encode(value: Value) -> bytes:
             return sized(0x0A, [encode(item) for item in value])
         case dict():
             return sized(0x0B, [encode(key) + encode(item) for key, item in value.items()])
+        case Record(tag=18, fields={0: int() as millis, 1: bool() as utc}):
+            return bytes([18]) + struct.pack("<d", millis) + bytes([int(utc)])
         case Record():
             return bytes([value.tag, len(value.fields)]) + b"".join(
                 bytes([index]) + encode(item) for index, item in value.fields.items()

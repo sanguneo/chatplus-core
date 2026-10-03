@@ -121,6 +121,73 @@ def test_unknown_nonrecord_is_not_silently_dropped(tmp_path: Path) -> None:
         _ = Reader(profile).snapshot()
 
 
+def test_a_message_sent_from_this_pc_is_read(tmp_path: Path) -> None:
+    profile = profile_at(tmp_path)
+    sent = Record(
+        38,
+        {
+            0: {"parentFolder": "https://synthetic.invalid/room/a"},
+            1: "m-sent",
+            6: {
+                "Date": "2026-01-01T05:00:00Z",
+                "TextContent": "sent here",
+                "Direction": "Out",
+                "From": "sip:me@synthetic.invalid",
+            },
+            10: {"timestamp": 1, "sendDate": Record(18, {0: 1_767_243_600_000, 1: True})},
+        },
+    )
+    with (tmp_path / "object.hive").open("ab") as output:
+        _ = output.write(frame("m-sent", encode(sent)))
+    by_id = {m.id: m for m in Reader(profile).snapshot().messages}
+    assert (by_id["m-sent"].from_me, by_id["m-sent"].text) == (True, "sent here")
+
+
+def orphan_with(tmp_path: Path, parent: str) -> Reader:
+    profile = profile_at(tmp_path)
+    sent = Record(
+        38,
+        {
+            0: {"parentFolder": parent},
+            1: "m-elsewhere",
+            6: {"Date": "2026-01-01T06:00:00Z", "TextContent": "x", "Direction": "Out"},
+        },
+    )
+    with (tmp_path / "object.hive").open("ab") as output:
+        _ = output.write(frame("m-elsewhere", encode(sent)))
+    return Reader(profile)
+
+
+def test_a_message_naming_its_folder_through_another_host_is_placed(tmp_path: Path) -> None:
+    reader = orphan_with(tmp_path, "https://alias.synthetic.invalid/room/a")
+    by_id = {m.id: m for m in reader.snapshot().messages}
+    assert by_id["m-elsewhere"].room_id == by_id["m-old"].room_id
+
+
+def test_a_message_whose_folder_path_is_unknown_is_refused(tmp_path: Path) -> None:
+    reader = orphan_with(tmp_path, "https://synthetic.invalid/room/zzz")
+    with pytest.raises(StorageError) as error:
+        _ = reader.snapshot()
+    assert error.value.issue is StorageIssue.ORPHAN
+
+
+def test_a_folder_path_shared_by_two_folders_is_refused(tmp_path: Path) -> None:
+    reader = orphan_with(tmp_path, "https://third.synthetic.invalid/room/a")
+    twin = Record(37, {0: {"resourceURL": "https://other.synthetic.invalid/room/a"}, 3: {}})
+    with (tmp_path / "folder.hive").open("ab") as output:
+        _ = output.write(frame("folder-twin", encode(twin)))
+    with pytest.raises(StorageError) as error:
+        _ = reader.snapshot()
+    assert error.value.issue is StorageIssue.ORPHAN
+
+
+def test_a_key_put_to_null_holds_no_record(tmp_path: Path) -> None:
+    profile = profile_at(tmp_path)
+    with (tmp_path / "object.hive").open("ab") as output:
+        _ = output.write(frame("m-pending", encode(None)))
+    assert len(Reader(profile).snapshot().messages) == 4
+
+
 def test_recipients_that_are_not_a_list_are_refused(tmp_path: Path) -> None:
     profile = profile_at(tmp_path)
     folder = Record(
