@@ -65,7 +65,7 @@ from chatplus_core.upload import UPLOAD_FEATURE, Uploader, perform_upload
 from chatplus_core.values import ValueFormatError
 
 CONTRACT_VERSION: Final = "0.2.7"
-ADAPTER_VERSION: Final = "0.5.0"
+ADAPTER_VERSION: Final = "0.6.0"
 MIN_TOKEN_BYTES: Final = 32
 MAX_ID_LENGTH: Final = 512
 MAX_STREAMS: Final = 8

@@ -1,6 +1,6 @@
 [project]
 name = "chatplus-core"
-version = "0.5.0"
+version = "0.6.0"
 description = "Read-only ChattingPlus adapter answering the tsuba contract"
 requires-python = ">=3.11"
 dependencies = [

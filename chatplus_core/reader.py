@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Final, Literal
 from urllib.parse import urlsplit
 
-from chatplus_core.hive import decode_frames
+from chatplus_core.hive import HiveFormatError, decode_frames
 from chatplus_core.models import LastMessage, Message, MessagesAnswer, Room, RoomsAnswer
 from chatplus_core.storage import Profile, StorageError, StorageIssue, discover, read_stable
 from chatplus_core.values import (
@@ -26,6 +26,19 @@ PREVIEW_CODE_POINTS: Final = 200
 OUTGOING: Final = "Out"
 MOBILE_DIGITS: Final = 12
 MOBILE_PREFIX: Final = "8210"
+COUNTRY_CODE: Final = "82"
+TEL: Final = "tel:"
+# The client's contacts: records under numeric ids, a number list in field 1 and
+# the shown name in field 2 (observed in client 1.5.4.6).
+CONTACT_STORE: Final = "contact_list.hive"
+CONTACT_TAG: Final = 133
+CONTACT_NUMBERS: Final = 1
+CONTACT_NAME: Final = 2
+SEOUL_PREFIX: Final = "02"
+SEOUL_LENGTHS: Final = (9, 10)
+AREA_LENGTHS: Final = (10, 11)
+SERVICE_LENGTH: Final = 8
+NAME_FAILURES: Final = (OSError, StorageError, HiveFormatError, ValueFormatError, UnicodeError)
 EARLIEST: Final = datetime.min.replace(tzinfo=UTC)
 
 Folder = tuple[str, dict[str | int, Value]]
@@ -106,6 +119,67 @@ def national_mobile(uri: str) -> str | None:
     return None
 
 
+def national_number(uri: str) -> str | None:
+    """Return a tel: URI as Korean national digits (+82 becomes 0), or None."""
+    if not uri.startswith(TEL):
+        return None
+    number = uri[len(TEL) :].split(";", 1)[0].strip()
+    digits = "".join(ch for ch in number if ch.isdigit())
+    if not digits:
+        return None
+    if not number.startswith("+"):
+        return digits
+    if digits.startswith(COUNTRY_CODE) and len(digits) > len(COUNTRY_CODE):
+        return "0" + digits[len(COUNTRY_CODE) :]
+    return None
+
+
+def format_number(digits: str) -> str:
+    """Group national digits as a Korean phone shows them; anything else as given."""
+    if digits.startswith(SEOUL_PREFIX) and len(digits) in SEOUL_LENGTHS:
+        return f"{digits[:2]}-{digits[2:-4]}-{digits[-4:]}"
+    if digits.startswith("0") and len(digits) in AREA_LENGTHS:
+        return f"{digits[:3]}-{digits[3:-4]}-{digits[-4:]}"
+    if len(digits) == SERVICE_LENGTH and digits.startswith("1"):
+        return f"{digits[:4]}-{digits[4:]}"
+    return digits
+
+
+def address_label(address: str, names: dict[str, str]) -> str:
+    """Name a tel: address by the client's contact, else show its number without the scheme."""
+    if not address.startswith(TEL):
+        return address
+    national = national_number(address)
+    if national is None:
+        return address[len(TEL) :].split(";", 1)[0].strip()
+    return names.get(national) or format_number(national)
+
+
+def contact_names(blob: bytes, profile: Profile) -> dict[str, str]:
+    """Map each national number to the one name the client's contacts give it.
+
+    The box's own bookkeeping (version, sync times) is plain values under named
+    keys and is skipped. A number that two contacts give different names maps to
+    no name, so the number is shown rather than one of the names guessed.
+    """
+    found: dict[str, set[str]] = {}
+    for payload in decode_frames(blob, profile.key).values():
+        value = decode_value(payload)
+        if not isinstance(value, Record):
+            continue
+        if value.tag != CONTACT_TAG:
+            raise ValueFormatError(ValueIssue.RECORD)
+        name = (optional_text(value.fields.get(CONTACT_NAME)) or "").strip()
+        numbers = value.fields.get(CONTACT_NUMBERS)
+        if not name or not isinstance(numbers, list):
+            continue
+        for number in numbers:
+            national = national_number(TEL + number) if isinstance(number, str) else None
+            if national is not None:
+                found.setdefault(national, set()).add(name)
+    return {number: next(iter(names)) for number, names in found.items() if len(names) == 1}
+
+
 def records(blob: bytes, profile: Profile, tag: int) -> tuple[Record, ...]:
     """Skip the version sentinel and keys put to null; reject any other unexpected record."""
     result: list[Record] = []
@@ -121,17 +195,17 @@ def records(blob: bytes, profile: Profile, tag: int) -> tuple[Record, ...]:
     return tuple(result)
 
 
-def to_message(record: Record, room_id: str) -> Message:
+def to_message(record: Record, room_id: str, names: dict[str, str]) -> Message:
     """Map one cached message; a non-text content type is media, without bytes."""
     attrs = mapping(record.fields.get(6))
     content_type = optional_text(attrs.get("Content-Type"))
     textual = content_type is None or content_type.lower().startswith("text/")
-    sender = optional_text(attrs.get("From")) or ""
+    address = optional_text(attrs.get("From")) or ""
     return Message(
         id=text(record.fields.get(1)),
         room_id=room_id,
-        sender=sender,
-        sender_id=sender or None,
+        sender=address_label(address, names),
+        sender_id=address or None,
         text=optional_text(attrs.get("TextContent")) or "",
         kind="text" if textual else "media",
         sent_at=timestamp(attrs.get("Date")),
@@ -139,7 +213,22 @@ def to_message(record: Record, room_id: str) -> Message:
     )
 
 
-def to_room(room_id: str, attrs: dict[str | int, Value], newest: Message | None) -> Room:
+def room_title(attrs: dict[str | int, Value], names: dict[str, str]) -> str:
+    """Title a conversation by its name, else its recipients, each tel: address named."""
+    name = optional_text(attrs.get("Name"))
+    if name:
+        return address_label(name, names)
+    recipients = attrs.get("Recipients")
+    if not isinstance(recipients, list):
+        return ""
+    return ", ".join(
+        address_label(recipient, names) for recipient in recipients if isinstance(recipient, str)
+    )
+
+
+def to_room(
+    room_id: str, attrs: dict[str | int, Value], newest: Message | None, names: dict[str, str]
+) -> Room:
     """Map one cached conversation, previewing its newest cached message."""
     date = attrs.get("Date")
     if date is not None:
@@ -153,7 +242,7 @@ def to_room(room_id: str, attrs: dict[str | int, Value], newest: Message | None)
     )
     return Room(
         id=room_id,
-        title=optional_text(attrs.get("Name")) or "",
+        title=room_title(attrs, names),
         kind=room_kind(attrs.get("Recipients")),
         last_activity_at=activity,
         last_message=preview,
@@ -205,6 +294,7 @@ class Reader:
         if any(read_stable(path) != blob for path, blob in zip(paths, blobs, strict=True)):
             raise StorageError(StorageIssue.CHANGED)
         epoch = profile.directory.name
+        names = self.names(profile)
         folders: dict[str, Folder] = {}
         for folder in records(blobs[0], profile, 37):
             raw = folder.fields.get(0)
@@ -226,15 +316,30 @@ class Reader:
             folder = folder_of(parent, folders, by_path)
             if folder is None:
                 continue
-            messages.append(to_message(record, folder[0]))
+            messages.append(to_message(record, folder[0], names))
         messages.sort(key=lambda message: (message.sent_at, message.id))
         newest = {message.room_id: message for message in messages}
         rooms = sorted(
-            (to_room(room_id, attrs, newest.get(room_id)) for room_id, attrs in folders.values()),
+            (
+                to_room(room_id, attrs, newest.get(room_id), names)
+                for room_id, attrs in folders.values()
+            ),
             key=lambda room: room.id,
         )
         rooms.sort(key=lambda room: room.last_activity_at or EARLIEST, reverse=True)
         return Snapshot(rooms=tuple(rooms), messages=tuple(messages))
+
+    def names(self, profile: Profile) -> dict[str, str]:
+        """Read the client's contact names; without a readable contact box, numbers stand in.
+
+        Names only label numbers. A contact box that is missing, mid-write or in an
+        unknown shape leaves every number unnamed instead of failing the rooms and
+        messages, which do not depend on it.
+        """
+        try:
+            return contact_names(read_stable(profile.directory / CONTACT_STORE), profile)
+        except NAME_FAILURES:
+            return {}
 
     def recipient_number(self, room_id: str) -> str | None:
         """Return the room's lone mobile recipient in national form, or None if not derivable."""
