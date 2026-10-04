@@ -4,9 +4,10 @@
 어댑터**입니다. tsuba와 별도 저장소이며 TUI는 없습니다. saya 같은 tsuba
 클라이언트가 설정만으로 붙을 수 있도록, tsuba의 `contract/openapi.json`(0.2.7)을 그대로
 답합니다. 읽기로 신고하는 기능은 방 목록(`rooms.list`), `before` 페이지네이션 메시지 읽기
-(`messages.read`), SSE 메시지 스트림(`messages.stream`)입니다. 쓰기는 **이미지 보내기
-(`attachments.send`)** 하나로, 실행 중인 클라이언트 창을 사람처럼 조작해 보냅니다(아래
-'이미지 보내기' 절). 텍스트·그 밖 파일 보내기와 첨부 바이트 다운로드는 아직 없습니다.
+(`messages.read`), SSE 메시지 스트림(`messages.stream`)입니다. 쓰기는 **텍스트 보내기
+(`messages.send`)** 와 **이미지 보내기(`attachments.send`)** 로, 실행 중인 클라이언트
+창을 사람처럼 조작해 보냅니다(아래 '보내기' 절). 영상·그 밖 파일 보내기와 첨부
+바이트 다운로드는 없습니다.
 
 ## 작동 방식
 
@@ -61,7 +62,7 @@ curl.exe -H "Authorization: Bearer $env:CHATPLUS_TOKEN" http://127.0.0.1:8766/ro
 | 라우트 | 결과 |
 | --- | --- |
 | `GET /health` | `{"ok": true}`, 토큰 없이 |
-| `GET /capabilities` | 계약 0.2.7, `account.kind: user`, 기능 `rooms.list`·`messages.read`(`paging: before-id`, `maxLimit: 1000`)·`messages.stream`(`resume: cursor`)·`attachments.send`(`types: image/jpeg·png·gif`, `caption: false`, `maxBytes: 10 MiB`) |
+| `GET /capabilities` | 계약 0.2.7, `account.kind: user`, 기능 `rooms.list`·`messages.read`(`paging: before-id`, `maxLimit: 1000`)·`messages.stream`(`resume: cursor`)·`messages.send`(`maxLength: 3072`, `receipt: stored`)·`attachments.send`(`types: image/jpeg·png·gif`, `caption: false`, `maxBytes: 10 MiB`) |
 | `GET /rooms` | 최근 활동 순 방 목록, `complete` |
 | `GET /messages?roomId=…&limit=50&before=<id>` | 오래된 것부터, `hasEarlier` |
 | `GET /stream?since=<roomId>:<id>` | SSE: `ready`→`message`…→`cursor`, 조용하면 `ping`, 읽기 실패 시 `error` 후 종료 |
@@ -164,7 +165,9 @@ uv run python -m tools.verify_socket
 메시지가 다른 호스트로 방을 가리키고 Hive 내장 DateTime을 담는 것을 확인해 읽도록 했습니다.
 2026-10-04 사용자 지시로 `attachments.send`를 구현했고, 본인 모바일 번호 방에 어댑터
 `POST /upload`로 합성 PNG를 다른 대화를 열어 둔 상태에서 보내 `200`과 캐시 되읽기(새
-`media` 메시지)로 확인했습니다. 다른 클라이언트 버전 호환성은 아직 입증하지 않았습니다.
+`media` 메시지)로 확인했습니다. 같은 날 `messages.send`도 더해, 본인 번호 방에 `POST /send`로
+한글 텍스트를 보내 `200`과 `/messages` 되읽기(같은 글의 내가 보낸 `text` 메시지)로
+확인했습니다. 다른 클라이언트 버전 호환성은 아직 입증하지 않았습니다.
 
 ## 계약
 
@@ -178,12 +181,14 @@ uv run python -m tools.verify_socket
 `/messages`·오류 응답·스트림 이벤트가 문서의 스키마와 맞는지. 계약을 올리려면 tsuba에서
 새 바이트를 복사하고 고정값과 `CONTRACT_VERSION`을 함께 바꿉니다.
 
-## 이미지 보내기(attachments.send)
+## 보내기(텍스트·이미지)
 
-`POST /upload`은 이미지 한 장(`image/jpeg`·`png`·`gif`, 10 MiB 이하, 캡션 없음)을 모바일
-번호 방에 보냅니다. 실행 중인 채팅+ 창을 **사람이 하듯** 조작해 보내고, 보낸 뒤 로컬
-캐시에서 그 방의 새 미디어 메시지를 되읽어 확인합니다(`receipt: stored`). 캡션이나
-이미지 아닌 파일은 `400`, 답장은 `501`, 실제 전송은 모두 되읽기로 확인합니다.
+텍스트는 `POST /send`(`messages.send`, 3072 코드포인트 이하), 이미지는 `POST /upload`
+(`attachments.send`: 이미지 한 장, `image/jpeg`·`png`·`gif`, 10 MiB 이하, 캡션 없음)으로
+모바일 번호 방에 보냅니다. 둘 다 실행 중인 채팅+ 창을 **사람이 하듯** 조작해 보내고,
+보낸 뒤 로컬 캐시에서 그 방의 새 메시지(텍스트는 같은 글, 이미지는 새 미디어)를
+되읽어 확인합니다(`receipt: stored`). 영상·이미지 아닌 파일이나 업로드 캡션은 `400`,
+답장은 `501`, 실제 전송은 모두 되읽기로 확인합니다.
 
 창을 어떻게 구동하나: 채팅+ PC는 Flutter 앱(창 하나, 네이티브 자식 컨트롤 없음)이지만,
 창을 화면에 보이는 고정 크기로 올려 둔 상태에서 창 메시지로 보낸 클릭과 타이핑(`WM_CHAR`)은
@@ -199,19 +204,20 @@ uv run python -m tools.verify_socket
   어느 단계든 확인되지 않으면 `BUSY`나 `INTERNAL`로 답하고 **자동 재시도하지 않습니다**
   (submitted≠delivered). 올린 이미지는 임시 폴더에 두었다가 한 시간 뒤 지웁니다.
 - 보내기는 **모바일 번호가 하나인 방**으로만 좁힙니다(정확 `+82 10`→`010` 파생, 리터럴
-  선택). 유선·단축 번호·그룹·비-tel 방은 saya에서 `attachments.send: false`로 좁혀
-  버튼이 그려지지 않습니다.
-- **텍스트 보내기(`messages.send`)는 범위에서 뺐습니다**(주인 결정: 채팅+는 이미지만).
-  창을 같은 방식으로 구동하면 기술적으로 가능하지만 선언하지 않으므로 `POST /send`는
-  `501 NOT_SUPPORTED`이고 saya에 입력창이 그려지지 않습니다.
+  선택). 유선·단축 번호·그룹·비-tel 방은 saya에서 `messages.send`와 `attachments.send`를
+  모두 `false`로 좁혀 입력창·버튼이 그려지지 않습니다.
+- **텍스트 보내기(`messages.send`)**도 같은 방식입니다: 빈 입력창에 글자를 타이핑하고
+  초록으로 바뀐 보내기 버튼을 누른 뒤, 캐시에서 같은 글의 내가 보낸 메시지를 되읽어
+  확인합니다. **영상·그 밖 파일 보내기는 범위에서 뺐습니다**(주인 결정: 첨부는
+  이미지만). 이미지가 아닌 파일은 업로드에서 거절합니다.
 
 ## 후속 작업
 
 상세 의존성, 불변식, 반례, 실행 절차와 완료 조건은
 [후속 작업 계획](.omo/plans/chatplus-core-followup.md)에 정리합니다. 계획의 B2(계정 신원),
 F1(페이지네이션), F2(SSE), F3(발송 상태기계 설계), F4(첨부 메타데이터)와 tsuba 계약
-전환(§14)은 구현됐고, OCI의 saya에 연결해 실데이터로 확인했습니다. 이미지 보내기도
-구현·확인했습니다(위 '이미지 보내기' 절). 남은 것은 텍스트 보내기(범위 밖, 주인 결정),
+전환(§14)은 구현됐고, OCI의 saya에 연결해 실데이터로 확인했습니다. 텍스트·이미지 보내기도
+구현·확인했습니다(위 '보내기' 절). 남은 것은 영상·파일 보내기(범위 밖, 주인 결정),
 읽음 상태(`unread`) 매핑, 스냅샷 세대 일관성(C2)입니다.
 
 공식 PC 지원 조건과 외부 형식 근거:

@@ -22,12 +22,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from struct import pack
-from typing import Final, TypeAlias, cast, final
+from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, cast, final
 
 import anyio
 
 from chatplus_core.envelope import ErrorCode
 from chatplus_core.sender import ClientUnavailableError, RoomUnverifiedError, SendError
+
+if TYPE_CHECKING:
+    from chatplus_core.models import Room
 
 WINDOW_CLASS: Final = "FLUTTER_RUNNER_WIN32_WINDOW"
 WINDOW_TITLE: Final = "채팅+"
@@ -177,6 +180,7 @@ class Step(StrEnum):
     FILE_NAME = "take the picture's name"
     DIALOG_CLOSE = "close its file dialog"
     STAGED = "show the picture in the conversation"
+    MESSAGE = "take the message into the box"
 
 
 class ClientBusyError(SendError):
@@ -374,6 +378,31 @@ class ClientWindow:
     async def upload(self, number: str, picture: Path) -> None:
         """Send the picture to the number's conversation, or refuse having sent nothing."""
         await anyio.to_thread.run_sync(self._upload, number, picture)
+
+    async def send_text(self, number: str, text: str) -> None:
+        """Type the text into the number's conversation and send it, or refuse sending nothing."""
+        await anyio.to_thread.run_sync(self._send_text, number, text)
+
+    def _send_text(self, number: str, text: str) -> None:
+        _ = self._api.thread_dpi(PER_MONITOR_AWARE_V2)
+        if self._locked():
+            raise ClientLockedError
+        top, _pid = self._window()
+        view = self._api.find_child(top, None, VIEW_CLASS, None)
+        if not view:
+            raise ClientUnavailableError
+        with self._placed(top, view) as scale:
+            self._open_room(view, scale, number)
+            if not self._until(
+                lambda: composer_empty(self._pixels(view, scale, COMPOSER)[2]), STEP_SECONDS
+            ):
+                raise DraftPresentError
+            self._type(view, text)
+            if not self._until(
+                lambda: ready_to_send(self._pixels(view, scale, SEND_BUTTON)[2]), STEP_SECONDS
+            ):
+                raise ClientBusyError(Step.MESSAGE)
+            self._click(view, scale, SEND)
 
     def _upload(self, number: str, picture: Path) -> None:
         _ = self._api.thread_dpi(PER_MONITOR_AWARE_V2)
@@ -638,3 +667,38 @@ class ClientWindow:
             lambda: ready_to_send(self._pixels(view, scale, SEND_BUTTON)[2]), STEP_SECONDS
         ):
             raise ClientBusyError(Step.STAGED)
+
+
+@final
+class NumberSource(Protocol):
+    """Something that maps each room id to its lone mobile number, or None."""
+
+    def recipient_numbers(self) -> dict[str, str | None]:
+        """Return every room's lone mobile recipient in national form, None where not derivable."""
+        ...
+
+
+class TextWindow(Protocol):
+    """Something that types one message into a mobile number's conversation."""
+
+    async def send_text(self, number: str, text: str) -> None:
+        """Type the text and send it, or raise a SendError having sent nothing."""
+        ...
+
+
+@final
+class WindowSender:
+    """Send text by driving the window, resolving a room's lone mobile number from the cache."""
+
+    def __init__(self, reader: NumberSource, window: TextWindow) -> None:
+        """Hold the cache to resolve the number and the window that does the typing."""
+        self._reader: NumberSource = reader
+        self._window: TextWindow = window
+
+    async def submit(self, room: "Room", text: str) -> None:
+        """Type the text into the room's mobile conversation, or refuse having sent nothing."""
+        numbers = await anyio.to_thread.run_sync(self._reader.recipient_numbers)
+        number = numbers.get(room.id)
+        if number is None:
+            raise RoomUnverifiedError
+        await self._window.send_text(number, text)

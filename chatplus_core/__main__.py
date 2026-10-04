@@ -7,7 +7,8 @@ from typing import Final
 import uvicorn
 
 from chatplus_core.api import MAX_STREAMS, create_app
-from chatplus_core.winclient import ClientWindow
+from chatplus_core.reader import Reader
+from chatplus_core.winclient import ClientWindow, WindowSender
 
 DEFAULT_PORT: Final = 8766
 MIN_PORT: Final = 1024
@@ -38,8 +39,16 @@ def resolve_port() -> int:
 
 def main() -> None:
     """Keep credentials out of command-line arguments and request logs."""
-    uploader = ClientWindow() if os.name == "nt" else None
-    app = create_app(os.environ.get("CHATPLUS_TOKEN", ""), uploader=uploader)
+    # Sending drives the running client window; the text sender shares the reader
+    # so it resolves a room's mobile number from the same cache the reads use.
+    window = ClientWindow()
+    reader = Reader()
+    app = create_app(
+        os.environ.get("CHATPLUS_TOKEN", ""),
+        reader=reader,
+        sender=WindowSender(reader, window),
+        uploader=window,
+    )
     uvicorn.run(
         app,
         host="127.0.0.1",

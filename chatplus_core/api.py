@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Annotated, Final, Literal
 
 import anyio
 from cryptography.exceptions import InvalidTag
@@ -65,7 +65,7 @@ from chatplus_core.upload import UPLOAD_FEATURE, Uploader, perform_upload
 from chatplus_core.values import ValueFormatError
 
 CONTRACT_VERSION: Final = "0.2.7"
-ADAPTER_VERSION: Final = "0.4.0"
+ADAPTER_VERSION: Final = "0.5.0"
 MIN_TOKEN_BYTES: Final = 32
 MAX_ID_LENGTH: Final = 512
 MAX_STREAMS: Final = 8
@@ -355,13 +355,12 @@ def _route_upload(app: FastAPI, guard: list[params.Depends], upload: Upload) -> 
     app.add_api_route("/upload", answer, methods=["POST"], dependencies=guard)
 
 
-def narrowed(reader: Reader, answer: RoomsAnswer) -> RoomsAnswer:
-    """Take pictures away from rooms the client cannot be pointed at by one mobile number."""
+def narrowed(reader: Reader, answer: RoomsAnswer, features: tuple[str, ...]) -> RoomsAnswer:
+    """Take the wired write features away from rooms with no single mobile number to aim at."""
+    off: dict[str, Literal[False]] = dict.fromkeys(features, False)
     numbers = reader.recipient_numbers()
     rooms = tuple(
-        room
-        if numbers.get(room.id) is not None
-        else room.model_copy(update={"features": {"attachments.send": False}})
+        room if numbers.get(room.id) is not None else room.model_copy(update={"features": off})
         for room in answer.rooms
     )
     return answer.model_copy(update={"rooms": rooms})
@@ -381,6 +380,10 @@ def create_app(
     slots = StreamSlots(limit=MAX_STREAMS)
     write_line = WriteLine()
     capabilities = declaration(can_send=sender is not None, can_upload=uploader is not None)
+    narrowable = (
+        *(("messages.send",) if sender is not None else ()),
+        *(("attachments.send",) if uploader is not None else ()),
+    )
     expected = hashlib.sha256(token.encode("utf-8")).digest()
     guard = [params.Depends(_require_token(expected))]
     app = FastAPI(
@@ -403,7 +406,7 @@ def create_app(
     @app.get("/rooms", dependencies=guard, response_model_exclude_none=True)
     def rooms() -> RoomsAnswer:
         answer = backend.rooms()
-        return answer if uploader is None else narrowed(backend, answer)
+        return answer if not narrowable else narrowed(backend, answer, narrowable)
 
     @app.get("/messages", dependencies=guard, response_model_exclude_none=True)
     def messages(
