@@ -7,6 +7,7 @@ from typing import Final
 import uvicorn
 
 from chatplus_core.api import MAX_STREAMS, create_app
+from chatplus_core.winclient import ClientWindow
 
 DEFAULT_PORT: Final = 8766
 MIN_PORT: Final = 1024
@@ -37,7 +38,8 @@ def resolve_port() -> int:
 
 def main() -> None:
     """Keep credentials out of command-line arguments and request logs."""
-    app = create_app(os.environ.get("CHATPLUS_TOKEN", ""))
+    uploader = ClientWindow() if os.name == "nt" else None
+    app = create_app(os.environ.get("CHATPLUS_TOKEN", ""), uploader=uploader)
     uvicorn.run(
         app,
         host="127.0.0.1",

@@ -1,11 +1,12 @@
 # chatplus-core
 
 실행 중인 채팅+ Windows 클라이언트의 **로컬 캐시를 읽어 tsuba 어댑터 계약으로 답하는
-읽기 전용 어댑터**입니다. tsuba와 별도 저장소이며 TUI는 없습니다. saya 같은 tsuba
-클라이언트가 설정만으로 붙을 수 있도록, tsuba의 `contract/openapi.json`(0.2.5)을 그대로
-답합니다. 신고하는 기능은 방 목록(`rooms.list`), `before` 페이지네이션 메시지 읽기
-(`messages.read`), SSE 메시지 스트림(`messages.stream`)뿐입니다. 실제 발송(설계·합성
-테스트만 존재)과 첨부 바이트 다운로드는 없습니다.
+어댑터**입니다. tsuba와 별도 저장소이며 TUI는 없습니다. saya 같은 tsuba
+클라이언트가 설정만으로 붙을 수 있도록, tsuba의 `contract/openapi.json`(0.2.7)을 그대로
+답합니다. 읽기로 신고하는 기능은 방 목록(`rooms.list`), `before` 페이지네이션 메시지 읽기
+(`messages.read`), SSE 메시지 스트림(`messages.stream`)입니다. 쓰기는 **이미지 보내기
+(`attachments.send`)** 하나로, 실행 중인 클라이언트 창을 사람처럼 조작해 보냅니다(아래
+'이미지 보내기' 절). 텍스트·그 밖 파일 보내기와 첨부 바이트 다운로드는 아직 없습니다.
 
 ## 작동 방식
 
@@ -60,10 +61,11 @@ curl.exe -H "Authorization: Bearer $env:CHATPLUS_TOKEN" http://127.0.0.1:8766/ro
 | 라우트 | 결과 |
 | --- | --- |
 | `GET /health` | `{"ok": true}`, 토큰 없이 |
-| `GET /capabilities` | 계약 0.2.5, `account.kind: user`, 기능 `rooms.list`·`messages.read`(`paging: before-id`, `maxLimit: 1000`)·`messages.stream`(`resume: cursor`) |
+| `GET /capabilities` | 계약 0.2.7, `account.kind: user`, 기능 `rooms.list`·`messages.read`(`paging: before-id`, `maxLimit: 1000`)·`messages.stream`(`resume: cursor`)·`attachments.send`(`types: image/jpeg·png·gif`, `caption: false`, `maxBytes: 10 MiB`) |
 | `GET /rooms` | 최근 활동 순 방 목록, `complete` |
 | `GET /messages?roomId=…&limit=50&before=<id>` | 오래된 것부터, `hasEarlier` |
 | `GET /stream?since=<roomId>:<id>` | SSE: `ready`→`message`…→`cursor`, 조용하면 `ping`, 읽기 실패 시 `error` 후 종료 |
+| `POST /upload` | `attachments.send`: 이미지 한 장을 모바일 번호 방에 보내고 `receipt: stored`로 저장된 메시지를 돌려줌 |
 | `GET /media`, `POST /send`·`/edit`·`/delete`·`/react`·`/read` | 기능을 신고하지 않으므로 `501 NOT_SUPPORTED` |
 | `GET /icon` | 제공자 아이콘이 없으므로 `404 NOT_FOUND` |
 
@@ -155,17 +157,19 @@ uv run python -m tools.verify_socket
 `/health` 200, 무인증 401, 인증 200을 확인한 다음 자신이 띄운 프로세스만 종료합니다.
 
 2026-10-03 확인한 클라이언트는 `com.sktelecom.torchlight` 1.5.4.6입니다.
-177개 합성 테스트가 통과했고, 실제 캐시에서 43개 방(모두 `direct`)·141개 메시지(본문 113개,
+합성 테스트가 통과했고, 실제 캐시에서 43개 방(모두 `direct`)·141개 메시지(본문 113개,
 `media` 26개, 내가 보낸 것 15개)를 조회했습니다. 가장 큰 방(27개)은 `before` 페이지네이션이
 전체 이력과 정확히 일치했고, 실제 루프백 TCP 서버로 health 200·무인증 401·인증 200·방
-43개를 확인했습니다. 이 어댑터는 아무것도 보내지 않습니다. 사용자 지시로 채팅+ 창에서 114로
-테스트 메시지 1건을 보냈고, 그 메시지가 다른 호스트로 방을 가리키고 Hive 내장 DateTime을 담는 것을
-확인해 읽도록 했습니다. 다른 클라이언트 버전 호환성은 아직 입증하지 않았습니다.
+43개를 확인했습니다. 사용자 지시로 채팅+ 창에서 114로 테스트 메시지 1건을 보냈고, 그
+메시지가 다른 호스트로 방을 가리키고 Hive 내장 DateTime을 담는 것을 확인해 읽도록 했습니다.
+2026-10-04 사용자 지시로 `attachments.send`를 구현했고, 본인 모바일 번호 방에 어댑터
+`POST /upload`로 합성 PNG를 다른 대화를 열어 둔 상태에서 보내 `200`과 캐시 되읽기(새
+`media` 메시지)로 확인했습니다. 다른 클라이언트 버전 호환성은 아직 입증하지 않았습니다.
 
 ## 계약
 
 이 어댑터가 답하는 계약은 tsuba의 것입니다. `contract/tsuba.openapi.json`은 tsuba
-`contract/openapi.json`(0.2.5)의 바이트 그대로 복사본이며, saya가 고정한 사본과 SHA-256이
+`contract/openapi.json`(0.2.7)의 바이트 그대로 복사본이며, saya가 고정한 사본과 SHA-256이
 같습니다. `.gitattributes`가 Windows에서 이 파일의 줄바꿈을 바꾸지 않게 합니다.
 
 `tests/test_contract.py`는 그 사본으로 다음을 검사합니다: 바이트가 고정값과 같은지, 계약
@@ -174,35 +178,41 @@ uv run python -m tools.verify_socket
 `/messages`·오류 응답·스트림 이벤트가 문서의 스키마와 맞는지. 계약을 올리려면 tsuba에서
 새 바이트를 복사하고 고정값과 `CONTRACT_VERSION`을 함께 바꿉니다.
 
-## 전송(messages.send): 지금은 보조 방식 전용
+## 이미지 보내기(attachments.send)
 
-`POST /send` 계약 표면(쓰기 줄, 길이·방 검증, read-back `receipt: stored`)과 모바일 수신자
-파생은 구현·테스트돼 있지만, **어댑터 프로세스 자체가 채팅+ 창을 구동하지 못해
-`messages.send`는 선언하지 않습니다**(없으면 미지원이 계약 규칙). 그래서 saya에는 채팅+
-입력창이 그려지지 않고, `POST /send`는 `501 NOT_SUPPORTED`로 답합니다.
+`POST /upload`은 이미지 한 장(`image/jpeg`·`png`·`gif`, 10 MiB 이하, 캡션 없음)을 모바일
+번호 방에 보냅니다. 실행 중인 채팅+ 창을 **사람이 하듯** 조작해 보내고, 보낸 뒤 로컬
+캐시에서 그 방의 새 미디어 메시지를 되읽어 확인합니다(`receipt: stored`). 캡션이나
+이미지 아닌 파일은 `400`, 답장은 `501`, 실제 전송은 모두 되읽기로 확인합니다.
 
-이유: 채팅+ PC는 Flutter 앱(창 하나, 네이티브 자식 컨트롤 없음)이라 kanao가 카카오톡
-입력창에 쓰는 방식이 통하지 않습니다. 서버형 프로세스에서 네 가지를 실측했고 모두
-실패했습니다 — 창 메시지로 키 입력 전달(`WM_CHAR`), 접근성 `ValuePattern.SetValue`(E_FAIL),
-포그라운드 강제 후 입력, 창을 앞으로 올리기(`SetForegroundWindow` 거부). HTTP 요청을
-처리하는 서버는 포그라운드 권한이 없고, 이 Flutter 창은 백그라운드 입력을 받지 않습니다.
+창을 어떻게 구동하나: 채팅+ PC는 Flutter 앱(창 하나, 네이티브 자식 컨트롤 없음)이지만,
+창을 화면에 보이는 고정 크기로 올려 둔 상태에서 창 메시지로 보낸 클릭과 타이핑(`WM_CHAR`)은
+받습니다. 포커스를 빼앗지 않고(`SetForegroundWindow` 없이) 측정한 좌표를 클릭하며, 각
+단계는 Windows 내장 OCR로 화면을 읽어 확인합니다 — 받는 사람 찾기에서 번호를 타이핑해
+결과를 고르고, 방 머리글의 번호를 되읽어 방을 확인하고, 파일 대화상자(`#32770`)의 이름
+칸에 경로를 넣고 열기를 누르고, 초록으로 바뀐 보내기 버튼을 픽셀로 확인한 뒤 누릅니다.
+이 경로가 통하지 않던 과거 판정은 창이 잠금 화면 뒤이거나 화면 밖·최소화 상태였기 때문이고,
+창을 화면에 올린 잠금 해제 세션에서는 됩니다.
 
-- **지금 전송 방법**: 실행 중인 채팅+ 창에 사람이 하듯 입력하는 보조(assisted) 방식으로
-  필요할 때 보냅니다. 전송 전 대상·문구를 화면으로 재확인하고, 보낸 뒤 로컬 캐시에서
-  보낸 메시지를 되읽어 확인합니다(submitted≠delivered, 자동 재시도 없음, 지정 수신자 외 금지).
-- **saya 버튼까지 하려면**: 입력을 넣을 수 있는 별도 서명된 접근성 헬퍼(Windows `uiAccess`)가
-  필요합니다. 코드 서명·설치·비용이 커서 결정은 열어 둡니다.
-- 전송은 모바일 번호 방으로만 좁힙니다(정확 `+82 10`→`010` 파생, 리터럴 선택). 유선·단축
-  번호·그룹·비-tel은 거절합니다. 클라이언트가 접근성에 대화 헤더/방 목록을 노출하지 않아,
-  수신자 검증은 캐시 파생으로만 가능합니다.
+- **안전장치**: 대상 방의 입력창에 미전송 초안·파일이 있으면 아무것도 보내지 않고
+  `FORBIDDEN`, 화면 보호기가 돌거나 데스크톱이 잠겨/끊겨 있으면 `REAUTH_REQUIRED`,
+  어느 단계든 확인되지 않으면 `BUSY`나 `INTERNAL`로 답하고 **자동 재시도하지 않습니다**
+  (submitted≠delivered). 올린 이미지는 임시 폴더에 두었다가 한 시간 뒤 지웁니다.
+- 보내기는 **모바일 번호가 하나인 방**으로만 좁힙니다(정확 `+82 10`→`010` 파생, 리터럴
+  선택). 유선·단축 번호·그룹·비-tel 방은 saya에서 `attachments.send: false`로 좁혀
+  버튼이 그려지지 않습니다.
+- **텍스트 보내기(`messages.send`)는 범위에서 뺐습니다**(주인 결정: 채팅+는 이미지만).
+  창을 같은 방식으로 구동하면 기술적으로 가능하지만 선언하지 않으므로 `POST /send`는
+  `501 NOT_SUPPORTED`이고 saya에 입력창이 그려지지 않습니다.
 
 ## 후속 작업
 
 상세 의존성, 불변식, 반례, 실행 절차와 완료 조건은
 [후속 작업 계획](.omo/plans/chatplus-core-followup.md)에 정리합니다. 계획의 B2(계정 신원),
 F1(페이지네이션), F2(SSE), F3(발송 상태기계 설계), F4(첨부 메타데이터)와 tsuba 계약
-전환(§14)은 구현됐고, OCI의 saya에 연결해 실데이터로 확인했습니다. 남은 것은 전송(위
-'전송' 절 참고), 읽음 상태(`unread`) 매핑, 스냅샷 세대 일관성(C2)입니다.
+전환(§14)은 구현됐고, OCI의 saya에 연결해 실데이터로 확인했습니다. 이미지 보내기도
+구현·확인했습니다(위 '이미지 보내기' 절). 남은 것은 텍스트 보내기(범위 밖, 주인 결정),
+읽음 상태(`unread`) 매핑, 스냅샷 세대 일관성(C2)입니다.
 
 공식 PC 지원 조건과 외부 형식 근거:
 

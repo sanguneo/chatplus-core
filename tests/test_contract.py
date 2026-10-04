@@ -25,7 +25,7 @@ from tests.fixtures import profile_at
 from tests.wire import arr, error_code, integer, obj, parse, sse, string
 
 CONTRACT = Path(__file__).resolve().parents[1] / "contract" / "tsuba.openapi.json"
-PINNED_SHA256 = "420cbb7fb731b6c6cd924aef7ccd8965361d5099cce4c29c6aed8a9d31a69968"
+PINNED_SHA256 = "454034e7f8210052331779dd2579300ae6532971f0e96c7ed0a1f7eb6064fe4c"
 DOCUMENT = obj(parse(CONTRACT.read_bytes()))
 TOKEN = bytes(range(32)).hex()
 AUTH = {"Authorization": f"Bearer {TOKEN}"}

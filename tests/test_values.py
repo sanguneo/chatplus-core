@@ -67,3 +67,10 @@ def test_malformed_values_are_rejected(payload: bytes) -> None:
     # When parsed, then no partial result is returned.
     with pytest.raises(ValueFormatError):
         _ = decode_value(payload)
+
+
+def test_thumbnail_size_record_is_decoded() -> None:
+    payload = (
+        bytes([33, 2, 0, 2]) + struct.pack("<d", 260.0) + bytes([1, 2]) + struct.pack("<d", 120.0)
+    )
+    assert decode_value(payload) == Record(33, {0: 260.0, 1: 120.0})

@@ -238,21 +238,23 @@ class Reader:
 
     def recipient_number(self, room_id: str) -> str | None:
         """Return the room's lone mobile recipient in national form, or None if not derivable."""
+        return self.recipient_numbers().get(room_id)
+
+    def recipient_numbers(self) -> dict[str, str | None]:
+        """Return every room's lone mobile recipient in national form, None where not derivable."""
         profile = self.profile if self.profile is not None else discover()
         epoch = profile.directory.name
+        numbers: dict[str, str | None] = {}
         for folder in records(read_stable(profile.directory / "folder.hive"), profile, 37):
             raw = folder.fields.get(0)
             if not isinstance(raw, dict) or "resourceURL" not in raw:
                 continue
-            if room_identity(epoch, text(raw.get("resourceURL"))) != room_id:
-                continue
             attrs = folder.fields.get(3)
             recipients = attrs.get("Recipients") if isinstance(attrs, dict) else None
-            if not isinstance(recipients, list) or len(recipients) != 1:
-                return None
-            only = recipients[0]
-            return national_mobile(only) if isinstance(only, str) else None
-        return None
+            only = recipients[0] if isinstance(recipients, list) and len(recipients) == 1 else None
+            room_id = room_identity(epoch, text(raw.get("resourceURL")))
+            numbers[room_id] = national_mobile(only) if isinstance(only, str) else None
+        return numbers
 
     def rooms(self) -> RoomsAnswer:
         """Return the rooms latest activity first, up to the adapter's own cap."""

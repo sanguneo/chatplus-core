@@ -63,7 +63,7 @@ class Capabilities(Model):
     provider: ProviderInfo
     account: AccountInfo
     revision: str
-    features: dict[str, dict[str, str | int]]
+    features: dict[str, dict[str, str | int | bool | list[str]]]
 
 
 class LastMessage(Model):
@@ -82,6 +82,7 @@ class Room(Model):
     unread: int = 0
     last_activity_at: datetime | None = None
     last_message: LastMessage | None = None
+    features: dict[str, Literal[False]] | None = None
 
 
 class Message(Model):

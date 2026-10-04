@@ -48,7 +48,9 @@ class Record:
 Value: TypeAlias = (
     bool | int | float | str | bytes | list["Value"] | dict[str | int, "Value"] | Record | None
 )
-ADAPTERS: Final = frozenset({37, 38, 52, 64, 75, 85, 122, 133, 145})
+# 33 is the thumbnail size a room keeps once a picture is sent from this PC
+# (`thumbnailSizeMap` values): width and height as fields 0 and 1, both doubles.
+ADAPTERS: Final = frozenset({33, 37, 38, 52, 64, 75, 85, 122, 133, 145})
 ENUM_ADAPTERS: Final = frozenset({42, 61})
 MAX_ITEMS: Final = 1_000_000
 MAX_DEPTH: Final = 32

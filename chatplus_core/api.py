@@ -5,9 +5,11 @@ import binascii
 import hashlib
 import hmac
 import json
+import tempfile
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from http import HTTPStatus
+from pathlib import Path
 from typing import Annotated, Final
 
 import anyio
@@ -59,10 +61,11 @@ from chatplus_core.stream import (
     position_cursor,
     sse_frame,
 )
+from chatplus_core.upload import UPLOAD_FEATURE, Uploader, perform_upload
 from chatplus_core.values import ValueFormatError
 
-CONTRACT_VERSION: Final = "0.2.5"
-ADAPTER_VERSION: Final = "0.3.0"
+CONTRACT_VERSION: Final = "0.2.7"
+ADAPTER_VERSION: Final = "0.4.0"
 MIN_TOKEN_BYTES: Final = 32
 MAX_ID_LENGTH: Final = 512
 MAX_STREAMS: Final = 8
@@ -72,12 +75,15 @@ STREAM_PING_SECONDS: Final = 15.0
 # (GSMA UP; gatewayapi.com/help-center/rcs-character-limits, twilio RCS char count).
 MAX_SEND_LENGTH: Final = 3072
 SEND_CONFIRM_SECONDS: Final = 10.0
-FEATURES: Final[dict[str, dict[str, str | int]]] = {
+FEATURES: Final[dict[str, dict[str, str | int | bool | list[str]]]] = {
     "rooms.list": {},
     "messages.read": {"paging": "before-id", "maxLimit": MAX_LIMIT},
     "messages.stream": {"resume": "cursor"},
 }
-SEND_FEATURE: Final[dict[str, str | int]] = {"maxLength": MAX_SEND_LENGTH, "receipt": "stored"}
+SEND_FEATURE: Final[dict[str, str | int | bool | list[str]]] = {
+    "maxLength": MAX_SEND_LENGTH,
+    "receipt": "stored",
+}
 UNSUPPORTED: Final = (
     ("GET", "/media"),
     ("POST", "/edit"),
@@ -95,6 +101,7 @@ READ_FAILURES: Final = (
     binascii.Error,
 )
 UNREADABLE: Final = "The local cache could not be read"
+UPLOAD_FOLDER: Final = "chatplus-core-uploads"
 CHALLENGE: Final = {"WWW-Authenticate": "Bearer"}
 
 
@@ -106,9 +113,13 @@ class ConfigurationError(Exception):
         super().__init__(f"CHATPLUS_TOKEN must contain at least {MIN_TOKEN_BYTES} bytes")
 
 
-def declaration(*, can_send: bool) -> Capabilities:
+def declaration(*, can_send: bool, can_upload: bool = False) -> Capabilities:
     """Declare what this adapter performs end to end, revised by a hash of the content."""
-    features = {**FEATURES, **({"messages.send": SEND_FEATURE} if can_send else {})}
+    features = {
+        **FEATURES,
+        **({"messages.send": SEND_FEATURE} if can_send else {}),
+        **({"attachments.send": UPLOAD_FEATURE} if can_upload else {}),
+    }
     draft = Capabilities(
         contract=ContractInfo(version=CONTRACT_VERSION),
         adapter=AdapterInfo(name="chatplus-core", version=ADAPTER_VERSION),
@@ -323,14 +334,53 @@ def _route_refusals(
         app.add_api_route(path, not_supported, methods=[method], dependencies=guard)
 
 
-def create_app(token: str, reader: Reader | None = None, sender: Sender | None = None) -> FastAPI:
+@dataclass(frozen=True, slots=True)
+class Upload:
+    """What POST /upload needs: the cache, the window driver, the write line and a folder."""
+
+    reader: Reader
+    uploader: Uploader
+    line: WriteLine
+    staging: Path
+
+
+def _route_upload(app: FastAPI, guard: list[params.Depends], upload: Upload) -> None:
+    """Route POST /upload behind the token, sharing the write line with /send."""
+
+    async def answer(request: Request) -> Response:
+        return await perform_upload(
+            upload.reader, upload.uploader, upload.line, request, upload.staging
+        )
+
+    app.add_api_route("/upload", answer, methods=["POST"], dependencies=guard)
+
+
+def narrowed(reader: Reader, answer: RoomsAnswer) -> RoomsAnswer:
+    """Take pictures away from rooms the client cannot be pointed at by one mobile number."""
+    numbers = reader.recipient_numbers()
+    rooms = tuple(
+        room
+        if numbers.get(room.id) is not None
+        else room.model_copy(update={"features": {"attachments.send": False}})
+        for room in answer.rooms
+    )
+    return answer.model_copy(update={"rooms": rooms})
+
+
+def create_app(
+    token: str,
+    reader: Reader | None = None,
+    sender: Sender | None = None,
+    uploader: Uploader | None = None,
+    staging: Path | None = None,
+) -> FastAPI:
     """Build the adapter; every route but /health requires the caller's token."""
     if len(token.encode("utf-8")) < MIN_TOKEN_BYTES:
         raise ConfigurationError
     backend = reader if reader is not None else Reader()
     slots = StreamSlots(limit=MAX_STREAMS)
     write_line = WriteLine()
-    capabilities = declaration(can_send=sender is not None)
+    capabilities = declaration(can_send=sender is not None, can_upload=uploader is not None)
     expected = hashlib.sha256(token.encode("utf-8")).digest()
     guard = [params.Depends(_require_token(expected))]
     app = FastAPI(
@@ -352,7 +402,8 @@ def create_app(token: str, reader: Reader | None = None, sender: Sender | None =
 
     @app.get("/rooms", dependencies=guard, response_model_exclude_none=True)
     def rooms() -> RoomsAnswer:
-        return backend.rooms()
+        answer = backend.rooms()
+        return answer if uploader is None else narrowed(backend, answer)
 
     @app.get("/messages", dependencies=guard, response_model_exclude_none=True)
     def messages(
@@ -373,6 +424,14 @@ def create_app(token: str, reader: Reader | None = None, sender: Sender | None =
         async def send(body: SendRequest) -> Response:
             return await perform_send(backend, active, write_line, body)
 
-    refusals = UNSUPPORTED if sender is not None else (*UNSUPPORTED, ("POST", "/send"))
+    if uploader is not None:
+        folder = staging if staging is not None else Path(tempfile.gettempdir()) / UPLOAD_FOLDER
+        _route_upload(app, guard, Upload(backend, uploader, write_line, folder))
+
+    refusals = (
+        *UNSUPPORTED,
+        *(() if sender is not None else (("POST", "/send"),)),
+        *(() if uploader is not None else (("POST", "/upload"),)),
+    )
     _route_refusals(app, guard, refusals)
     return app
