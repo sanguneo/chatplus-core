@@ -22,6 +22,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from chatplus_core.envelope import ErrorCode, error_body, failure
 from chatplus_core.hive import HiveFormatError
+from chatplus_core.icon import Icon, load_icon
 from chatplus_core.models import (
     AccountInfo,
     AdapterInfo,
@@ -65,7 +66,7 @@ from chatplus_core.upload import UPLOAD_FEATURE, Uploader, perform_upload
 from chatplus_core.values import ValueFormatError
 
 CONTRACT_VERSION: Final = "0.2.7"
-ADAPTER_VERSION: Final = "0.6.0"
+ADAPTER_VERSION: Final = "0.7.0"
 MIN_TOKEN_BYTES: Final = 32
 MAX_ID_LENGTH: Final = 512
 MAX_STREAMS: Final = 8
@@ -113,7 +114,9 @@ class ConfigurationError(Exception):
         super().__init__(f"CHATPLUS_TOKEN must contain at least {MIN_TOKEN_BYTES} bytes")
 
 
-def declaration(*, can_send: bool, can_upload: bool = False) -> Capabilities:
+def declaration(
+    *, can_send: bool, can_upload: bool = False, icon: str | None = None
+) -> Capabilities:
     """Declare what this adapter performs end to end, revised by a hash of the content."""
     features = {
         **FEATURES,
@@ -123,12 +126,12 @@ def declaration(*, can_send: bool, can_upload: bool = False) -> Capabilities:
     draft = Capabilities(
         contract=ContractInfo(version=CONTRACT_VERSION),
         adapter=AdapterInfo(name="chatplus-core", version=ADAPTER_VERSION),
-        provider=ProviderInfo(id="chatplus", name="채팅+"),
+        provider=ProviderInfo(id="chatplus", name="채팅+", icon=icon),
         account=AccountInfo(kind="user"),
         revision="",
         features=features,
     )
-    content = draft.model_dump_json(by_alias=True, exclude={"ok", "revision"})
+    content = draft.model_dump_json(by_alias=True, exclude={"ok", "revision"}, exclude_none=True)
     revision = hashlib.sha256(content.encode()).hexdigest()[:16]
     return draft.model_copy(update={"revision": revision})
 
@@ -276,9 +279,10 @@ async def not_supported() -> JSONResponse:
     return failure(ErrorCode.NOT_SUPPORTED, "This adapter does not declare the route's feature")
 
 
-async def no_icon() -> JSONResponse:
-    """Answer the icon route: this adapter declares no provider icon."""
-    return failure(ErrorCode.NOT_FOUND, "This adapter has no provider icon")
+ICON_HEADERS: Final = {
+    "content-security-policy": "default-src 'none'; sandbox",
+    "x-content-type-options": "nosniff",
+}
 
 
 async def _send_target(reader: Reader, body: SendRequest) -> tuple[Room, frozenset[str]] | Response:
@@ -325,11 +329,19 @@ async def perform_send(
     )
 
 
+def _route_icon(app: FastAPI, guard: list[params.Depends], icon: Icon) -> None:
+    """Serve the provider icon inert, behind the token like /capabilities."""
+
+    async def answer() -> Response:
+        return Response(content=icon.bytes, media_type=icon.media_type, headers=ICON_HEADERS)
+
+    app.add_api_route("/icon", answer, methods=["GET"], dependencies=guard)
+
+
 def _route_refusals(
     app: FastAPI, guard: list[params.Depends], routes: tuple[tuple[str, str], ...]
 ) -> None:
     """Route every documented operation this adapter does not perform, behind the token."""
-    app.add_api_route("/icon", no_icon, methods=["GET"], dependencies=guard)
     for method, path in routes:
         app.add_api_route(path, not_supported, methods=[method], dependencies=guard)
 
@@ -379,7 +391,10 @@ def create_app(
     backend = reader if reader is not None else Reader()
     slots = StreamSlots(limit=MAX_STREAMS)
     write_line = WriteLine()
-    capabilities = declaration(can_send=sender is not None, can_upload=uploader is not None)
+    icon = load_icon()
+    capabilities = declaration(
+        can_send=sender is not None, can_upload=uploader is not None, icon=icon.version
+    )
     narrowable = (
         *(("messages.send",) if sender is not None else ()),
         *(("attachments.send",) if uploader is not None else ()),
@@ -399,9 +414,11 @@ def create_app(
     def health() -> Health:
         return Health()
 
-    @app.get("/capabilities", dependencies=guard)
+    @app.get("/capabilities", dependencies=guard, response_model_exclude_none=True)
     def describe() -> Capabilities:
         return capabilities
+
+    _route_icon(app, guard, icon)
 
     @app.get("/rooms", dependencies=guard, response_model_exclude_none=True)
     def rooms() -> RoomsAnswer:

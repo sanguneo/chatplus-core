@@ -196,10 +196,11 @@ def test_undeclared_features_answer_not_supported(
     assert error_code(response.content) == "NOT_SUPPORTED"
 
 
-def test_icon_is_not_found_without_a_provider_icon(client: TestClient) -> None:
+def test_icon_is_served_as_the_provider_icon(client: TestClient) -> None:
     response = client.get("/icon", headers=AUTH)
-    assert response.status_code == 404
-    assert error_code(response.content) == "NOT_FOUND"
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert response.headers["content-security-policy"] == "default-src 'none'; sandbox"
 
 
 def test_wrong_method_names_the_allowed_one(client: TestClient) -> None:

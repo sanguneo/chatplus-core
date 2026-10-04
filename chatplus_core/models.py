@@ -46,6 +46,7 @@ class ProviderInfo(Model):
 
     id: str
     name: str
+    icon: str | None = None
 
 
 class AccountInfo(Model):

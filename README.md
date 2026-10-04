@@ -68,7 +68,7 @@ curl.exe -H "Authorization: Bearer $env:CHATPLUS_TOKEN" http://127.0.0.1:8766/ro
 | `GET /stream?since=<roomId>:<id>` | SSE: `ready`→`message`…→`cursor`, 조용하면 `ping`, 읽기 실패 시 `error` 후 종료 |
 | `POST /upload` | `attachments.send`: 이미지 한 장을 모바일 번호 방에 보내고 `receipt: stored`로 저장된 메시지를 돌려줌 |
 | `GET /media`, `POST /send`·`/edit`·`/delete`·`/react`·`/read` | 기능을 신고하지 않으므로 `501 NOT_SUPPORTED` |
-| `GET /icon` | 제공자 아이콘이 없으므로 `404 NOT_FOUND` |
+| `GET /icon` | 제공자 아이콘(말풍선+ SVG)을 `image/svg+xml`로, `default-src 'none'; sandbox`·`nosniff`를 붙여 돌려줍니다. `provider.icon`은 바이트가 바뀌면 바뀝니다 |
 
 `limit`는 1~1000(기본 50)입니다. `before`가 없으면 가장 새로운 `limit`개를, 있으면 그 id
 바로 앞의 `limit`개를 `sentAt`, `id` 오름차순으로 돌려줍니다. 이는 인과 순서나 서버 수신
