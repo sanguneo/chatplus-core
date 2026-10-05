@@ -7,6 +7,7 @@ from typing import Final
 import uvicorn
 
 from chatplus_core.api import MAX_STREAMS, create_app
+from chatplus_core.login import apply_env_file, load_lock_password
 from chatplus_core.reader import Reader
 from chatplus_core.winclient import ClientWindow, WindowSender
 
@@ -39,9 +40,11 @@ def resolve_port() -> int:
 
 def main() -> None:
     """Keep credentials out of command-line arguments and request logs."""
+    # Fill any missing settings (token, port, lock password) from a gitignored .env.
+    apply_env_file()
     # Sending drives the running client window; the text sender shares the reader
     # so it resolves a room's mobile number from the same cache the reads use.
-    window = ClientWindow()
+    window = ClientWindow(load_lock_password())
     reader = Reader()
     app = create_app(
         os.environ.get("CHATPLUS_TOKEN", ""),

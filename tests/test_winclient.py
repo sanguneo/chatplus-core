@@ -4,14 +4,17 @@ from typing import final
 import anyio
 import pytest
 
+from chatplus_core.envelope import ErrorCode
 from chatplus_core.models import Room
 from chatplus_core.sender import RoomUnverifiedError
 from chatplus_core.winclient import (
+    ClientAppLockedError,
     Line,
     WindowSender,
     composer_empty,
     digits,
     has_number,
+    lock_screen,
     ready_to_send,
 )
 
@@ -24,6 +27,17 @@ def test_a_number_matches_only_digit_for_digit() -> None:
     assert has_number(lines, "0100000000") is None
     assert has_number(lines, "01000000010") is None
     assert digits("010 0000-0001") == "01000000001"
+
+
+def test_only_the_lock_mode_title_reads_as_the_lock_screen() -> None:
+    assert lock_screen([Line(93, "010-0**0-0**0 님,"), Line(123, "잠금 모드로 로그인되었습니다.")])
+    assert lock_screen([Line(123, "잠금모드로 로그인되었습니다.")])
+    assert not lock_screen([Line(57, "채팅"), Line(121, "개인"), Line(166, "잠금")])
+    assert not lock_screen([])
+
+
+def test_an_unopened_lock_is_reauth_required() -> None:
+    assert ClientAppLockedError().code is ErrorCode.REAUTH_REQUIRED
 
 
 def shade(value: int, count: int) -> bytes:

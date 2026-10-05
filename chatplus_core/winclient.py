@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, cast, final
 import anyio
 
 from chatplus_core.envelope import ErrorCode
+from chatplus_core.login import LockPassword
 from chatplus_core.sender import ClientUnavailableError, RoomUnverifiedError, SendError
 
 if TYPE_CHECKING:
@@ -43,6 +44,9 @@ NEW_CHAT: Final = (344, 627)
 DIALOG_CLOSE: Final = (513, 68)
 ATTACH: Final = (411, 655)
 SEND: Final = (716, 656)
+# The client's own lock mode (after its idle timeout, or 잠금 모드 in its menu)
+# centres a six-digit password field; typing the sixth digit unlocks it.
+LOCK_FIELD: Final = (386, 197)
 FILE_NAME_ID: Final = 1148
 OPEN_ID: Final = 1
 CANCEL_ID: Final = 2
@@ -145,6 +149,7 @@ RESULTS: Final = Box(240, 280, 300, 380)
 HEADER: Final = Box(440, 40, 300, 55)
 COMPOSER: Final = Box(392, 560, 368, 40)
 SEND_BUTTON: Final = Box(688, 640, 57, 32)
+LOCK_TITLE: Final = Box(220, 80, 330, 70)
 
 
 class ClientLockedError(SendError):
@@ -155,6 +160,17 @@ class ClientLockedError(SendError):
         super().__init__(
             ErrorCode.REAUTH_REQUIRED,
             "Windows is locked or disconnected where the client runs; nothing was sent",
+        )
+
+
+class ClientAppLockedError(SendError):
+    """The client sits in its own lock mode and was not unlocked; nothing was sent."""
+
+    def __init__(self) -> None:
+        """Refuse with the reauth-required code: the lock password is unset or was refused."""
+        super().__init__(
+            ErrorCode.REAUTH_REQUIRED,
+            "The client is in its lock mode and was not unlocked; nothing was sent",
         )
 
 
@@ -199,6 +215,11 @@ def digits(text: str) -> str:
 def has_number(lines: list[Line], number: str) -> Line | None:
     """Return the first line that reads exactly as the number, ignoring separators."""
     return next((line for line in lines if digits(line.text) == number), None)
+
+
+def lock_screen(lines: list[Line]) -> bool:
+    """Tell the client's lock-mode screen by its title, however OCR spaces it."""
+    return any("잠금모드" in line.text.replace(" ", "") for line in lines)
 
 
 def luminance(bgra: bytes, index: int) -> int:
@@ -370,9 +391,10 @@ class Win32:
 class ClientWindow:
     """The running client's main window, driven by window messages and read by OCR."""
 
-    def __init__(self) -> None:
+    def __init__(self, lock_password: LockPassword | None = None) -> None:
         """Bind the Windows functions; nothing touches the client until an upload."""
         self._api: Win32 = Win32()
+        self._lock_password: LockPassword | None = lock_password
         self._script: Path = Path(tempfile.gettempdir()) / "chatplus-core-ocr.ps1"
 
     async def upload(self, number: str, picture: Path) -> None:
@@ -392,6 +414,7 @@ class ClientWindow:
         if not view:
             raise ClientUnavailableError
         with self._placed(top, view) as scale:
+            self._unlock(view, scale)
             self._open_room(view, scale, number)
             if not self._until(
                 lambda: composer_empty(self._pixels(view, scale, COMPOSER)[2]), STEP_SECONDS
@@ -413,6 +436,7 @@ class ClientWindow:
         if not view:
             raise ClientUnavailableError
         with self._placed(top, view) as scale:
+            self._unlock(view, scale)
             self._open_room(view, scale, number)
             if not self._until(
                 lambda: composer_empty(self._pixels(view, scale, COMPOSER)[2]), STEP_SECONDS
@@ -640,6 +664,17 @@ class ClientWindow:
         self._click(view, scale, (RESULTS.x + 60, row.top + 8))
         if not self._wait_lines(view, scale, HEADER, lambda ls: has_number(ls, number) is not None):
             raise RoomUnverifiedError
+
+    def _unlock(self, view: int, scale: float) -> None:
+        """Enter the lock password once if the client shows its lock screen; never retry."""
+        if not lock_screen(self._read(view, scale, LOCK_TITLE)):
+            return
+        if self._lock_password is None:
+            raise ClientAppLockedError
+        self._click(view, scale, LOCK_FIELD)
+        self._type(view, self._lock_password.value)
+        if not self._wait_lines(view, scale, LOCK_TITLE, lambda ls: not lock_screen(ls)):
+            raise ClientAppLockedError
 
     def _attach(self, view: int, scale: float, pid: int, picture: Path) -> None:
         self._click(view, scale, ATTACH)
