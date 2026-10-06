@@ -49,6 +49,12 @@ uv run python -m chatplus_core
 환경 변수에 1024~65535 범위의 정수를 지정합니다(범위 밖이거나 숫자가 아니면 시작하지 않습니다).
 서버는 루프백에만 바인딩하며, 32바이트 미만 토큰으로는 시작하지 않습니다.
 실행 시 생성한 토큰을 클라이언트에도 설정하세요.
+
+saya에는 이 어댑터가 스스로 등록할 수 있습니다(saya `docs/register.md`). `SAYA_REGISTER_URL`과
+`SAYA_REGISTER_TOKEN`을 주면 시작할 때 saya에 주소와 토큰을 알리고 30초마다 다시 알리며, 끝낼 때 등록을
+지웁니다. saya가 다른 기계에 있으면 saya가 닿을 주소를 `SAYA_ADVERTISE_URL`로 줍니다(예: `tailscale serve`로
+연 `https://<PC>.<tailnet>.ts.net:8767`). 등록이 실패해도 서빙은 계속하고, 토큰 없이 한 줄만 남깁니다.
+
 요청 접근 로그는 끕니다. 저장소 키와 메시지를 별도 파일로 내보내지 않습니다.
 
 ```powershell
