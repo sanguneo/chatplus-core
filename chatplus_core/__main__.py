@@ -2,13 +2,17 @@
 """Start the local service with an explicit token and loopback binding."""
 
 import os
+import platform
 from typing import Final
 
 import uvicorn
 
 from chatplus_core.api import MAX_STREAMS, create_app
 from chatplus_core.login import apply_env_file, load_lock_password
+from chatplus_core.macclient import STAGING, MacClient
 from chatplus_core.reader import Reader
+from chatplus_core.sender import Sender
+from chatplus_core.upload import Uploader
 from chatplus_core.winclient import ClientWindow, WindowSender
 
 DEFAULT_PORT: Final = 8766
@@ -38,19 +42,32 @@ def resolve_port() -> int:
     return port
 
 
+def writers(reader: Reader) -> tuple[Sender | None, Uploader | None]:
+    """Return this platform's window drivers; a platform without one answers reads only."""
+    if platform.system() == "Windows":
+        # The text sender shares the reader so it resolves a room's mobile number
+        # from the same cache the reads use.
+        window = ClientWindow(load_lock_password())
+        return WindowSender(reader, window), window
+    if platform.system() == "Darwin":
+        client = MacClient(load_lock_password())
+        return WindowSender(reader, client), client
+    return None, None
+
+
 def main() -> None:
     """Keep credentials out of command-line arguments and request logs."""
     # Fill any missing settings (token, port, lock password) from a gitignored .env.
     apply_env_file()
-    # Sending drives the running client window; the text sender shares the reader
-    # so it resolves a room's mobile number from the same cache the reads use.
-    window = ClientWindow(load_lock_password())
     reader = Reader()
+    sender, uploader = writers(reader)
     app = create_app(
         os.environ.get("CHATPLUS_TOKEN", ""),
         reader=reader,
-        sender=WindowSender(reader, window),
-        uploader=window,
+        sender=sender,
+        uploader=uploader,
+        # The sandboxed macOS client's open sheet may read Downloads; Windows uses temp.
+        staging=STAGING if platform.system() == "Darwin" else None,
     )
     uvicorn.run(
         app,
