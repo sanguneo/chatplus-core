@@ -1,6 +1,6 @@
 # chatplus-core
 
-실행 중인 채팅+ Windows 클라이언트의 **로컬 캐시를 읽어 tsuba 어댑터 계약으로 답하는
+실행 중인 채팅+ PC 클라이언트(Windows·macOS)의 **로컬 캐시를 읽어 tsuba 어댑터 계약으로 답하는
 어댑터**입니다. tsuba와 별도 저장소이며 TUI는 없습니다. saya 같은 tsuba
 클라이언트가 설정만으로 붙을 수 있도록, tsuba의 `contract/openapi.json`(0.2.7)을 그대로
 답합니다. 읽기로 신고하는 기능은 방 목록(`rooms.list`), `before` 페이지네이션 메시지 읽기
@@ -102,6 +102,51 @@ curl.exe -H "Authorization: Bearer $env:CHATPLUS_TOKEN" http://127.0.0.1:8766/ro
 메시지를 가리키는 커서는 지금부터로 낮추지 않고 400으로 거절합니다. 스트림은 동시에 8개까지
 받고, 아홉 번째는 `503 BUSY`입니다.
 
+## macOS
+
+같은 코드가 macOS 채팅+(`/Applications/ChattingPlus.app`, `com.sktelecom.torchlight`)도
+답합니다. 시작할 때 `platform.system()`으로 Windows·macOS를 고르고, 둘 다 아니면 읽기에서
+`500 INTERNAL`로 거절합니다. 실행 명령과 포트·토큰 설정은 위와 같습니다(mac에서는
+`uv`가 Python 3.11 이상을 받아 둡니다).
+
+```sh
+cd ~/dev/chatplus-core
+uv sync --frozen
+CHATPLUS_TOKEN="$(cat ~/.chatplus-core/token)" CHATPLUS_PORT=8767 uv run python -m chatplus_core
+```
+
+- **읽기**: 박스(`folder.hive`·`object.hive`·`contact_list.hive`)와 형식은 Windows와 같고,
+  위치는 샌드박스 컨테이너 `~/Library/Containers/com.sktelecom.torchlight/Data/Documents/edb/<profile>/`
+  입니다. Hive 키는 키체인이 아니라 앱의 `shared_preferences`
+  (`Library/Preferences/com.sktelecom.torchlight.plist`)에 `flutter.cipher_key_<profile>_<기기>`
+  URL-safe Base64 32바이트로 있어, 그 plist를 읽기만 합니다(AES-GCM·자격 증명 단계 없음).
+  프로필이나 맞는 키가 정확히 하나가 아니면 Windows처럼 거절합니다. macOS가 다른 앱 데이터
+  접근을 물으면 어댑터를 띄우는 터미널에 허용해야 합니다.
+- **보내기**: 채팅+ mac은 Flutter 시맨틱 트리를 손쉬운 사용(AX)에 내보내므로, OCR·화면 녹화
+  없이 AX로 단추를 누르고 값을 읽습니다. 앱을 활성화하거나 포커스를 빼앗지 않습니다. Flutter
+  입력칸은 AX로 쓴 값을 받지 않아 글자는 `CGEventPostToPid` 키 입력으로 넣습니다. 어댑터를
+  띄우는 터미널(또는 Python)에 **시스템 설정 › 개인정보 보호 및 보안 › 손쉬운 사용** 권한이
+  필요하고, 없으면 `REAUTH_REQUIRED`로 거절합니다.
+- **방 확인**: mac 클라이언트는 방 머리글과 말풍선을 AX에 내보내지 않습니다. 그래서 방을 열기
+  전에, 받는 사람 찾기 결과 중 **정확히 하나**가 번호와 숫자 그대로 같을 때만 그 행을 누릅니다
+  (없거나 둘 이상이면 `FORBIDDEN`, 대화상자를 닫고 아무것도 보내지 않음). 보낸 뒤 확인은
+  Windows와 같이 캐시 되읽기입니다.
+- **창 크기**: Windows와 같은 768×680 배치를 씁니다. 창이 다른 크기면 그 크기로 맞췄다가
+  끝나면 되돌리고, 방이 열려 목록이 가려져 있으면 머리글 단추로 목록 화면으로 접은 뒤
+  다시 펼칩니다. 숨김·최소화면 잠시 보이게 했다가 되돌립니다.
+- **이미지**: 샌드박스 앱의 열기 시트가 읽을 수 있는 `~/Downloads/chatplus-core-uploads/`에
+  올린 그림을 두고(한 시간 뒤 지움), 시트 사이드바의 다운로드에서 그 파일을 고릅니다.
+  붙여넣기(⌘V)는 비활성 앱에 전달되지 않아 쓰지 않습니다.
+- **잠금**: 화면이 잠겼거나 콘솔 세션이 아니면 `REAUTH_REQUIRED`. 채팅+ 자체 잠금 모드는
+  Windows와 같은 규칙(`CHATPLUS_LOCK_PASSWORD`로 한 번만 입력)으로 처리하지만, **mac에서 실제
+  잠금 화면으로는 아직 확인하지 못했습니다.**
+
+2026-10-06 mac(채팅+ 1.5.4 (127))에서 확인: 방 45개·메시지 163개 조회, 가장 큰 방(27개)
+`before` 페이지네이션이 전체 이력과 일치, 루프백 TCP 서버 health 200·무인증 401·인증 200,
+SSE `ready`. 본인 번호 방에 어댑터 `POST /send`(한글 텍스트)와 `POST /upload`(합성 PNG)가
+각각 `200`과 캐시 되읽기로 확인됐고, 입력창에 미전송 그림이 있을 때 `/upload`가 `403
+FORBIDDEN`으로 아무것도 보내지 않는 것도 확인했습니다.
+
 ## saya 연결
 
 saya는 이 어댑터를 tsuba 어댑터로, 설정만으로 붙입니다. 코어는 루프백에 두고 kanao처럼
@@ -121,6 +166,13 @@ saya 쪽은 프록시 설정 두 가지입니다. `/adapters` 인덱스에 `{"id
 붙입니다(saya `deploy/Caddyfile.example`의 어댑터 handle과 같은 모양). 토큰은 위 토큰 파일과
 같은 값을 권한 600인 env 파일에 둡니다. 이 PC에서 코어가 꺼져 있으면 saya 목록에서 채팅+만
 빠집니다.
+
+**한 계정에는 코어 하나만.** Windows와 mac에 같은 채팅+ 계정이 로그인돼 있어도 코어는 한
+PC에서만 띄우고 saya에는 어댑터 id `chatplus` 하나만 둡니다. 두 코어를 모두 붙이면 같은
+방이 saya 목록에 두 번 나오고, 보내기도 두 클라이언트 중 어느 쪽으로 갈지 갈립니다. PC를
+바꾸려면 원래 PC의 코어를 끄고 saya의 `/adapters/chatplus/*` 업스트림만 새 PC 주소로
+바꿉니다. 두 플랫폼은 같은 코드라 계약 버전과 기능 신고가 같습니다. 다른 계정이라면
+어댑터 id를 따로(예: `chatplus-mac`) 두어 둘 다 붙입니다.
 
 ## 보장 범위
 
