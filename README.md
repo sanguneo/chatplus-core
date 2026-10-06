@@ -9,6 +9,11 @@
 창을 사람처럼 조작해 보냅니다(아래 '보내기' 절). 영상·그 밖 파일 보내기와 첨부
 바이트 다운로드는 없습니다.
 
+> [!IMPORTANT]
+> **업그레이드 안내 (2026-10-06): saya 연결 방식이 바뀌었습니다.** saya 쪽에 어댑터 설정을 하지 않고, 이 어댑터가 saya 에 스스로 등록합니다(아래 「saya 연결」).
+> 기존 배포는 [업그레이드 가이드](https://github.com/sanguneo/saya/blob/main/docs/upgrade-registration.md)를 따라 옮기세요. 에이전트에게 그 문서를 주고 "이대로 옮겨 줘"라고
+> 하면 됩니다.
+
 ## 작동 방식
 
 실행 중인 공식 채팅+ 클라이언트가 이미 복호화해 둔 **로컬 캐시만 읽습니다**. 프로토콜을
@@ -155,30 +160,31 @@ FORBIDDEN`으로 아무것도 보내지 않는 것도 확인했습니다.
 
 ## saya 연결
 
-saya는 이 어댑터를 tsuba 어댑터로, 설정만으로 붙입니다. 코어는 루프백에 두고 kanao처럼
-`tailscale serve`로 tailnet에만 엽니다. 이 PC는 8766을 다른 프로세스가 쓰므로 8767을 씁니다.
+**2026-10-06부터 saya 쪽에는 설정이 없습니다.** 이 어댑터가 saya에 스스로 등록합니다(saya
+`docs/register.md`). 예전처럼 saya의 Caddyfile에 `/adapters/chatplus/*` handle과
+`SAYA_ADAPTER_CHATPLUS_TOKEN`을 적었다면 지우고, 아래 세 변수를 이 어댑터에 줍니다.
 
 ```powershell
 $env:CHATPLUS_PORT = "8767"
 $env:CHATPLUS_TOKEN = (Get-Content "$HOME\.chatplus-core\token" -Raw).Trim()
+$env:SAYA_REGISTER_URL = "https://<saya 기계>.<tailnet>.ts.net:8798"
+$env:SAYA_REGISTER_TOKEN = "<saya의 SAYA_REGISTER_TOKEN>"
+$env:SAYA_ADVERTISE_URL = "https://<이 PC>.<tailnet>.ts.net:8767"
 uv run python -m chatplus_core
-# 한 번만 하면 Tailscale이 기억합니다.
+# 한 번만 하면 Tailscale이 기억합니다. saya는 tailnet 주소로 이 어댑터에 닿습니다.
 tailscale serve --bg --https=8767 http://127.0.0.1:8767
 ```
 
-saya 쪽은 프록시 설정 두 가지입니다. `/adapters` 인덱스에 `{"id":"chatplus"}`를 넣고,
-`/adapters/chatplus/*`를 `https://<pc>.<tailnet>.ts.net:8767`로 넘기면서
-`Authorization: Bearer {env.SAYA_ADAPTER_CHATPLUS_TOKEN}`와 `Host {upstream_hostport}`를
-붙입니다(saya `deploy/Caddyfile.example`의 어댑터 handle과 같은 모양). 토큰은 위 토큰 파일과
-같은 값을 권한 600인 env 파일에 둡니다. 이 PC에서 코어가 꺼져 있으면 saya 목록에서 채팅+만
-빠집니다.
+시작하면 `registered chatplus with saya as …` 한 줄이 남고 saya 목록에 채팅+가 나타납니다.
+30초마다 다시 알리고, 끝내면 등록을 지웁니다. 코어가 꺼지면 90초 안에 saya 목록에서 채팅+만
+빠집니다. 등록이 거절되거나 saya에 닿지 않아도 어댑터는 그대로 돌고, 이유만 한 줄 남깁니다(토큰은
+남기지 않습니다).
 
 **한 계정에는 코어 하나만.** Windows와 mac에 같은 채팅+ 계정이 로그인돼 있어도 코어는 한
-PC에서만 띄우고 saya에는 어댑터 id `chatplus` 하나만 둡니다. 두 코어를 모두 붙이면 같은
-방이 saya 목록에 두 번 나오고, 보내기도 두 클라이언트 중 어느 쪽으로 갈지 갈립니다. PC를
-바꾸려면 원래 PC의 코어를 끄고 saya의 `/adapters/chatplus/*` 업스트림만 새 PC 주소로
-바꿉니다. 두 플랫폼은 같은 코드라 계약 버전과 기능 신고가 같습니다. 다른 계정이라면
-어댑터 id를 따로(예: `chatplus-mac`) 두어 둘 다 붙입니다.
+PC에서만 띄웁니다. 두 코어가 모두 등록하면 saya는 나중에 등록한 쪽 하나만 쓰지만, 둘이 번갈아
+다시 알리며 서로를 덮으니 보내기가 어느 클라이언트로 갈지 정해지지 않습니다. PC를 바꾸려면 원래
+PC의 코어를 끄고 새 PC에서 띄우면 됩니다. saya 쪽에서 바꿀 것은 없습니다. 어댑터 id는 `chatplus`로
+고정이라, 지금은 두 번째 계정을 따로 붙일 수 없습니다.
 
 ## 보장 범위
 
