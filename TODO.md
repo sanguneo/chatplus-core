@@ -61,6 +61,8 @@ chatplus-core는 한 코드베이스이고 대부분이 플랫폼 무관이라, 
 - [x] 화면 잠금 감지(`CGSessionCopyCurrentDictionary`) → `REAUTH_REQUIRED`
 - [ ] 채팅+ 자체 잠금 모드: Windows와 같은 규칙으로 구현했지만 **mac 잠금 화면 실물로는 미확인**
       (잠금 비밀번호가 없어 직접 잠그지 않음)
+- [ ] 채팅+ 자동 로그아웃 화면("보안을 위해 자동 로그아웃되었습니다"): Windows는 0.9.1에서 같은 비밀번호로
+      풀지만 mac `lock_screen`은 "잠금 모드" 제목만 알아본다
 - [x] 첨부는 이미지만 — 열기 시트(AX)에서 `~/Downloads/chatplus-core-uploads/`의 파일을 고름
 - [x] 라이브 확인: 내 번호 방에 `POST /send`·`POST /upload` 각 1회 `200` + 캐시 되읽기, 미전송 그림이 있을 때
       `403 FORBIDDEN`(아무것도 안 보냄). 그 미전송 그림(합성 8×8 PNG)을 치우려고 직접 보낸 1건이 더 있음

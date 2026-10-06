@@ -10,6 +10,7 @@ before the final click on send has sent nothing.
 """
 
 import ctypes
+import math
 import os
 import subprocess
 import tempfile
@@ -47,6 +48,15 @@ SEND: Final = (716, 656)
 # The client's own lock mode (after its idle timeout, or 잠금 모드 in its menu)
 # centres a six-digit password field; typing the sixth digit unlocks it.
 LOCK_FIELD: Final = (386, 197)
+# The idle timeout logs the client out instead, with a title of its own and the
+# same six-digit field higher up; six digits log it back in. Its field takes
+# characters only once the click has focused it, which its underline shows by
+# turning blue (grey at rest); digits sent sooner are dropped.
+LOGOUT_FIELD: Final = (386, 170)
+FOCUS_PIXELS: Final = 150
+# The client will not shrink below its own minimum, which at any scale but 100%
+# rounds to a few pixels past the driven size: 2 at 125%, 5 at 150% (2026-10-06).
+SIZE_SLACK: Final = 4
 FILE_NAME_ID: Final = 1148
 OPEN_ID: Final = 1
 CANCEL_ID: Final = 2
@@ -150,6 +160,19 @@ HEADER: Final = Box(440, 40, 300, 55)
 COMPOSER: Final = Box(392, 560, 368, 40)
 SEND_BUTTON: Final = Box(688, 640, 57, 32)
 LOCK_TITLE: Final = Box(220, 80, 330, 70)
+LOGOUT_UNDERLINE: Final = Box(240, 184, 288, 8)
+
+
+@dataclass(frozen=True, slots=True)
+class PasswordScreen:
+    """A screen asking for the six-digit password: where its field is and how it shows focus."""
+
+    field: tuple[int, int]
+    underline: Box | None
+
+
+LOCK_MODE: Final = PasswordScreen(LOCK_FIELD, None)
+LOGGED_OUT: Final = PasswordScreen(LOGOUT_FIELD, LOGOUT_UNDERLINE)
 
 
 class ClientLockedError(SendError):
@@ -217,9 +240,28 @@ def has_number(lines: list[Line], number: str) -> Line | None:
     return next((line for line in lines if digits(line.text) == number), None)
 
 
-def lock_screen(lines: list[Line]) -> bool:
-    """Tell the client's lock-mode screen by its title, however OCR spaces it."""
-    return any("잠금모드" in line.text.replace(" ", "") for line in lines)
+def password_screen(lines: list[Line]) -> PasswordScreen | None:
+    """Tell a password screen by its title, however OCR spaces it."""
+    for line in lines:
+        text = line.text.replace(" ", "")
+        if "잠금모드" in text:
+            return LOCK_MODE
+        # The box cuts the title's first syllable off: "그아웃되었습니다".
+        if "아웃되었" in text:
+            return LOGGED_OUT
+    return None
+
+
+def underlined(bgra: bytes) -> bool:
+    """Tell a focused field's blue underline from its grey rest."""
+    coloured = sum(1 for index in range(len(bgra) // 4) if saturated(bgra, index) > SEND_SATURATION)
+    return coloured >= FOCUS_PIXELS
+
+
+def fits(client: tuple[int, int], wanted: tuple[int, int], scale: float) -> bool:
+    """Tell a client area close enough to the driven size for its measured places."""
+    slack = math.ceil(SIZE_SLACK * scale)
+    return all(abs(got - want) <= slack for got, want in zip(client, wanted, strict=True))
 
 
 def luminance(bgra: bytes, index: int) -> int:
@@ -525,7 +567,7 @@ class ClientWindow:
         )
         try:
             _ = self._api.client_rect(view, ctypes.byref(client))
-            if (client.right, client.bottom) != (width, height):
+            if not fits((client.right, client.bottom), (width, height), scale):
                 raise ClientBusyError(Step.SIZE)
             yield scale
         finally:
@@ -666,14 +708,20 @@ class ClientWindow:
             raise RoomUnverifiedError
 
     def _unlock(self, view: int, scale: float) -> None:
-        """Enter the lock password once if the client shows its lock screen; never retry."""
-        if not lock_screen(self._read(view, scale, LOCK_TITLE)):
+        """Enter the lock password once if the client asks for it; never retry."""
+        screen = password_screen(self._read(view, scale, LOCK_TITLE))
+        if screen is None:
             return
         if self._lock_password is None:
             raise ClientAppLockedError
-        self._click(view, scale, LOCK_FIELD)
+        self._click(view, scale, screen.field)
+        underline = screen.underline
+        if underline is not None and not self._until(
+            lambda: underlined(self._pixels(view, scale, underline)[2]), STEP_SECONDS
+        ):
+            raise ClientAppLockedError
         self._type(view, self._lock_password.value)
-        if not self._wait_lines(view, scale, LOCK_TITLE, lambda ls: not lock_screen(ls)):
+        if not self._wait_lines(view, scale, LOCK_TITLE, lambda ls: password_screen(ls) is None):
             raise ClientAppLockedError
 
     def _attach(self, view: int, scale: float, pid: int, picture: Path) -> None:
