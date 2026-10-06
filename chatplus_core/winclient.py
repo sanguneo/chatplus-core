@@ -300,7 +300,7 @@ HandleCall: TypeAlias = Callable[..., int | None]
 
 
 def _bind(
-    library: ctypes.WinDLL, name: str, argtypes: list[type], restype: type = ctypes.c_int
+    library: ctypes.CDLL, name: str, argtypes: list[type], restype: type = ctypes.c_int
 ) -> Call:
     function = library.__getattr__(name)
     function.argtypes = argtypes
@@ -308,7 +308,7 @@ def _bind(
     return cast("Call", function)
 
 
-def _handle(library: ctypes.WinDLL, name: str, argtypes: list[type]) -> HandleCall:
+def _handle(library: ctypes.CDLL, name: str, argtypes: list[type]) -> HandleCall:
     return cast("HandleCall", _bind(library, name, argtypes, ctypes.c_void_p))
 
 
