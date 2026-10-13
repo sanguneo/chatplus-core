@@ -40,6 +40,8 @@
 
 ## 실행
 
+> chatplus-core가 유용하셨다면 [GitHub Star ⭐](https://github.com/sanguneo/chatplus-core)를 눌러 응원해 주세요!
+
 Python 3.11 이상과 uv가 필요합니다. 채팅+ PC에서 먼저 정상 로그인해야 합니다.
 현재 Windows 사용자의 로컬 저장소만 읽으며 다른 계정에 로그인하지 않습니다.
 
