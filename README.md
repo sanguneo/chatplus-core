@@ -1,3 +1,9 @@
+<div align="center">
+
+<img src="assets/og-chatplus-core.png" alt="chatplus-core — 채팅+ PC의 문자를 saya 한 화면에서 읽고, 따라가고, 보낸다" width="900">
+
+</div>
+
 # chatplus-core
 
 실행 중인 채팅+ PC 클라이언트(Windows·macOS)의 **로컬 캐시를 읽어 tsuba 어댑터 계약으로 답하는
